@@ -34,6 +34,7 @@ export async function startWebServer(): Promise<FastifyInstance> {
         active: monitor.active,
         status: kuma.latestStatus.get(id),
         statusLabel: statusLabel(kuma.latestStatus.get(id) ?? -1),
+        latestPing: kuma.latestPing.get(id),
         avgPing: kuma.avgPing.get(id),
       });
     }

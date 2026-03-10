@@ -254,7 +254,7 @@ function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, numbe
   const status = latestStatus.get(monitor.id);
   const emoji = status !== undefined ? statusEmoji(status) : "\u26AA";
   const label = status !== undefined ? statusLabel(status) : "UNKNOWN";
-  const ping = kuma.avgPing.get(monitor.id);
+  const ping = kuma.latestPing.get(monitor.id) ?? kuma.avgPing.get(monitor.id);
   const pingStr = ping !== undefined && ping > 0 ? ` (${Math.round(ping)}ms)` : "";
   return `${emoji} ${monitor.name} - ${label}${pingStr}`;
 }

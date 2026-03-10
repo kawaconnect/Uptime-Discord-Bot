@@ -128,6 +128,8 @@ class KumaClient extends EventEmitter {
   private _monitors = new Map<number, KumaMonitor>();
   private _latestStatus = new Map<number, number>();
   private _avgPing = new Map<number, number>();
+  /** Latest ping from real-time heartbeats (not smoothed). */
+  private _latestPing = new Map<number, number>();
   private _uptime24h = new Map<number, number>();
   private _connected = false;
   private _authenticated = false;
@@ -162,6 +164,8 @@ class KumaClient extends EventEmitter {
   get monitors(): Map<number, KumaMonitor> { return this._monitors; }
   get latestStatus(): Map<number, number> { return this._latestStatus; }
   get avgPing(): Map<number, number> { return this._avgPing; }
+  /** Latest per-heartbeat ping (changes every cycle, not smoothed). */
+  get latestPing(): Map<number, number> { return this._latestPing; }
   get uptime24h(): Map<number, number> { return this._uptime24h; }
   get connected(): boolean { return this._connected && this._authenticated; }
   get serverInfo() { return this._info; }
@@ -283,7 +287,7 @@ class KumaClient extends EventEmitter {
 
       // Update ping from every heartbeat so the board always shows fresh values
       if (hb.ping !== null && hb.ping !== undefined) {
-        this._avgPing.set(monId, hb.ping);
+        this._latestPing.set(monId, hb.ping);
       }
 
       const monitor = this._monitors.get(monId);
@@ -437,6 +441,7 @@ class KumaClient extends EventEmitter {
     this._monitors.clear();
     this._latestStatus.clear();
     this._avgPing.clear();
+    this._latestPing.clear();
     this._uptime24h.clear();
     this._lastHeartbeatAt = 0;
     this._lastHeartbeatListAt = 0;
