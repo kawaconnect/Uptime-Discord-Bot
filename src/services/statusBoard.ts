@@ -189,12 +189,27 @@ function buildStatusEmbed(): EmbedBuilder {
   if (summary.maintenance > 0) headerParts.push(`${statusEmoji(MonitorStatus.MAINTENANCE)} **${summary.maintenance}** maintenance`);
   if (summary.paused > 0) headerParts.push(`\u23F8\uFE0F **${summary.paused}** paused`);
 
+  // Show both bot timezone and user's local time (Discord renders <t:> in viewer's tz)
+  const now = new Date();
+  const unixTs = Math.floor(now.getTime() / 1000);
+  const tz = getSetting("TIMEZONE");
+  let botTimeStr = "";
+  if (tz) {
+    try {
+      botTimeStr = now.toLocaleString("en-US", { timeZone: tz, timeStyle: "short", dateStyle: "short" });
+    } catch { /* ignore */ }
+  }
+
+  const timeLines = [
+    `\n\nLast updated: <t:${unixTs}:T> (your time)`,
+    botTimeStr ? `Bot time: **${botTimeStr}** (${tz})` : "",
+  ].filter(Boolean).join("\n");
+
   return new EmbedBuilder()
     .setTitle(`Service Status (${summary.up}/${summary.total - summary.paused})`)
-    .setDescription(`${headerParts.join("  |  ")}\n${description}`)
+    .setDescription(`${headerParts.join("  |  ")}\n${description}${timeLines}`)
     .setColor(color)
-    .setFooter({ text: "Auto-updates on every heartbeat" })
-    .setTimestamp(new Date());
+    .setFooter({ text: "Auto-updates on every heartbeat" });
 }
 
 function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, number>): string {
