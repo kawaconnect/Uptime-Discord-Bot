@@ -254,11 +254,12 @@ class KumaClient extends EventEmitter {
       this._lastHeartbeatAt = Date.now();
       this._eventCounts.heartbeat++;
 
-      const prevStatus = this._latestStatus.get(hb.monitor_id);
-      this._latestStatus.set(hb.monitor_id, hb.status);
+      const monId = Number(hb.monitor_id);
+      const prevStatus = this._latestStatus.get(monId);
+      this._latestStatus.set(monId, hb.status);
 
-      const monitor = this._monitors.get(hb.monitor_id);
-      const name = monitor?.name ?? `#${hb.monitor_id}`;
+      const monitor = this._monitors.get(monId);
+      const name = monitor?.name ?? `#${monId}`;
 
       // Log every heartbeat - this is how we know it's working
       logger.info(
@@ -271,7 +272,7 @@ class KumaClient extends EventEmitter {
       if (prevStatus !== undefined && prevStatus !== hb.status) {
         this._eventCounts.statusChange++;
         logger.warn(
-          { id: hb.monitor_id, name, from: statusLabel(prevStatus), to: statusLabel(hb.status) },
+          { id: monId, name, from: statusLabel(prevStatus), to: statusLabel(hb.status) },
           "STATUS CHANGE"
         );
         if (monitor) {
