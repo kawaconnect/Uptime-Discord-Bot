@@ -1,6 +1,10 @@
 /**
  * Status board - a persistent message in a configured channel that shows
  * the current state of all monitors, auto-updated on every heartbeat.
+ *
+ * The message always stays at the bottom of the channel:
+ *  - If the bot's message is already the last message, edit it in place.
+ *  - If someone posts below it, delete the old one and re-send (silent).
  */
 
 import {
@@ -8,6 +12,7 @@ import {
   EmbedBuilder,
   TextChannel,
   Message,
+  Events,
 } from "discord.js";
 import { logger } from "../util/logger.js";
 import { getSetting, setSetting } from "../db/index.js";
@@ -19,6 +24,7 @@ const STATUS_MSG_KEY = "STATUS_MESSAGE_ID";
 
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let pendingUpdate = false;
+let needsReanchor = false;
 
 /**
  * Start listening for kuma events and auto-update the status board.
@@ -38,6 +44,16 @@ export function startStatusBoard(client: Client): void {
     updateStatusBoard(client).catch((err) =>
       logger.warn({ err }, "Failed to update status board on status change")
     );
+  });
+
+  // Watch for new messages in the status channel - if someone posts below
+  // the status message, flag it for re-anchoring on the next update.
+  client.on(Events.MessageCreate, (msg) => {
+    if (msg.author.bot) return;
+    const channelId = getSetting(STATUS_CHANNEL_KEY);
+    if (!channelId || msg.channelId !== channelId) return;
+    needsReanchor = true;
+    scheduleUpdate(client);
   });
 }
 
@@ -63,45 +79,51 @@ export async function updateStatusBoard(client: Client): Promise<void> {
     return;
   }
 
-  const embed = buildStatusEmbed();
-  const msgId = getSetting(STATUS_MSG_KEY);
+  const channel = await client.channels.fetch(channelId) as TextChannel | null;
+  if (!channel?.isTextBased()) {
+    logger.warn({ channelId }, "Status board channel not found");
+    return;
+  }
 
-  // Try to edit existing message
-  if (msgId) {
+  const embed = buildStatusEmbed();
+  const oldMsgId = getSetting(STATUS_MSG_KEY);
+
+  // If we have an existing message and don't need to re-anchor, just edit
+  if (oldMsgId && !needsReanchor) {
     try {
-      const channel = await client.channels.fetch(channelId) as TextChannel | null;
-      if (channel?.isTextBased()) {
-        const msg = await channel.messages.fetch(msgId);
-        await discordQueue.add(async () => {
-          await msg.edit({ embeds: [embed] });
-        });
-        return;
-      }
+      const oldMsg = await channel.messages.fetch(oldMsgId);
+      await discordQueue.add(async () => {
+        await oldMsg.edit({ embeds: [embed] });
+      });
+      return;
     } catch {
       // Message gone - fall through to create new one
       logger.info("Status board message missing, creating new one");
     }
   }
 
-  // Create new status message
-  try {
-    const channel = await client.channels.fetch(channelId) as TextChannel | null;
-    if (!channel?.isTextBased()) {
-      logger.warn({ channelId }, "Status board channel not found");
-      return;
+  // Need to re-anchor: delete old message and send a new one at the bottom
+  if (oldMsgId) {
+    try {
+      const oldMsg = await channel.messages.fetch(oldMsgId);
+      await discordQueue.add(async () => { await oldMsg.delete(); });
+    } catch {
+      // Already deleted
     }
+  }
 
+  needsReanchor = false;
+
+  try {
     const msg = await discordQueue.add(async () =>
-      channel.send({ embeds: [embed] })
+      channel.send({
+        embeds: [embed],
+        flags: 4096, // SUPPRESS_NOTIFICATIONS - no beep
+      } as any)
     ) as Message | undefined;
 
     if (msg) {
       setSetting(STATUS_MSG_KEY, msg.id);
-      try {
-        await discordQueue.add(async () => { await msg.pin(); });
-      } catch {
-        // Pin limit may be reached
-      }
     }
   } catch (err) {
     logger.error({ err }, "Failed to create status board message");
