@@ -195,35 +195,28 @@ class KumaClient extends EventEmitter {
       }
     });
 
-    this.socket.on("heartbeatList", (data: Record<string, KumaHeartbeat[]>) => {
-      for (const [idStr, beats] of Object.entries(data)) {
-        if (beats.length > 0) {
-          this._latestStatus.set(Number(idStr), beats[beats.length - 1].status);
-        }
-      }
-      // Re-emit so presence/status board recalculates with actual status data
-      this.emit("monitorListUpdated", this._monitors);
-    });
-
-    this.socket.on("importantHeartbeatList", (data: Record<string, KumaHeartbeat[]>) => {
-      for (const [idStr, beats] of Object.entries(data)) {
-        if (beats.length > 0) {
-          this._latestStatus.set(Number(idStr), beats[beats.length - 1].status);
-        }
+    // Kuma v2 sends heartbeatList per-monitor: (monitorId, beats[], ...)
+    this.socket.on("heartbeatList", (monitorId: string, beats: KumaHeartbeat[], ...rest: unknown[]) => {
+      if (Array.isArray(beats) && beats.length > 0) {
+        this._latestStatus.set(Number(monitorId), beats[beats.length - 1].status);
       }
       this.emit("monitorListUpdated", this._monitors);
     });
 
-    this.socket.on("avgPing", (data: Record<string, number>) => {
-      for (const [idStr, val] of Object.entries(data)) {
-        this._avgPing.set(Number(idStr), val);
+    this.socket.on("importantHeartbeatList", (monitorId: string, beats: KumaHeartbeat[], ...rest: unknown[]) => {
+      if (Array.isArray(beats) && beats.length > 0) {
+        this._latestStatus.set(Number(monitorId), beats[beats.length - 1].status);
       }
+      this.emit("monitorListUpdated", this._monitors);
     });
 
-    this.socket.on("uptime", (data: Record<string, number>) => {
-      for (const [idStr, val] of Object.entries(data)) {
-        this._uptime24h.set(Number(idStr), val);
-      }
+    // Kuma v2 sends per-monitor: (monitorId, value, ...)
+    this.socket.on("avgPing", (monitorId: string, value: number) => {
+      this._avgPing.set(Number(monitorId), value);
+    });
+
+    this.socket.on("uptime", (monitorId: string, value: number) => {
+      this._uptime24h.set(Number(monitorId), value);
     });
 
     this.socket.on("info", (info: Record<string, unknown>) => {
