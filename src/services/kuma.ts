@@ -254,16 +254,21 @@ class KumaClient extends EventEmitter {
       this._lastHeartbeatAt = Date.now();
       this._eventCounts.heartbeat++;
 
-      const monId = Number(hb.monitor_id);
+      // Kuma v2 may use monitorID instead of monitor_id
+      const raw = hb as unknown as Record<string, unknown>;
+      const monId = Number(raw.monitorID ?? raw.monitor_id ?? 0);
       const prevStatus = this._latestStatus.get(monId);
       this._latestStatus.set(monId, hb.status);
 
       const monitor = this._monitors.get(monId);
-      const name = monitor?.name ?? `#${monId}`;
+      const name = monitor?.name ?? `?${monId}`;
 
-      // Log every heartbeat - this is how we know it's working
+      // Log heartbeat with raw keys on first occurrence to debug field names
+      if (this._eventCounts.heartbeat <= 3) {
+        logger.info({ rawKeys: Object.keys(hb), raw: hb }, "heartbeat RAW (first 3)");
+      }
       logger.info(
-        { id: hb.monitor_id, name, status: statusLabel(hb.status), prev: prevStatus !== undefined ? statusLabel(prevStatus) : "none", ping: hb.ping },
+        { id: monId, name, status: statusLabel(hb.status), prev: prevStatus !== undefined ? statusLabel(prevStatus) : "none", ping: hb.ping },
         "heartbeat"
       );
 
