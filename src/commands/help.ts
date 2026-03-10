@@ -16,11 +16,21 @@ export async function handleHelpCommand(
     .setColor(0x7289da)
     .addFields(
       {
-        name: "Status",
+        name: "Monitoring",
         value: [
-          "`/status` - Quick summary (up/down/pending counts)",
-          "`/monitors` - List all monitors with current state",
-          "`/monitor <name>` - Detailed info for a specific monitor",
+          "`/status` - Quick summary with up/down counts",
+          "`/monitors [filter]` - List all monitors (filter: all, up, down, paused, maintenance)",
+          "`/monitor <name>` - Detailed info for a specific monitor (autocomplete)",
+          "`/downtime` - Show all currently down services",
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "Actions",
+        value: [
+          "`/pause <name>` - Pause a monitor (autocomplete)",
+          "`/resume <name>` - Resume a paused monitor (autocomplete)",
+          "`/refresh` - Force refresh the status board embed",
         ].join("\n"),
         inline: false,
       },
@@ -30,6 +40,7 @@ export async function handleHelpCommand(
           "`/setup status <channel>` - Set the auto-updating status board channel",
           "`/setup alerts <channel>` - Set the @everyone alert channel",
           "`/setup timezone <tz>` - Set bot timezone (e.g. America/New_York)",
+          "`/setup alerts-toggle <type> <on|off>` - Enable/disable alert types",
           "`/setup show` - Show current configuration",
         ].join("\n"),
         inline: false,
@@ -37,9 +48,10 @@ export async function handleHelpCommand(
       {
         name: "Auto Features",
         value: [
-          "**Status Board** - Auto-updating embed in the configured channel showing all monitors",
-          "**Alerts** - @everyone when a monitor goes DOWN, recovery notice when it comes back UP",
-          "**Disconnect Alert** - @everyone if connection to Uptime Kuma is lost for 30+ seconds",
+          "**Status Board** - Auto-updating embed showing all monitors (configure with `/setup status`)",
+          "**Down Alerts** - @everyone when a monitor goes DOWN",
+          "**Recovery Alerts** - Notice when a service comes back UP",
+          "**Disconnect Alert** - @everyone if connection to Uptime Kuma is lost 30+ seconds",
           "**Bot Presence** - Shows X/Y services up in the member list",
         ].join("\n"),
         inline: false,

@@ -1,8 +1,10 @@
 /**
- * Alert system - sends @everyone alerts when:
- * - Connection to Uptime Kuma is lost
- * - A monitor goes DOWN
- * - A monitor recovers (UP after being DOWN)
+ * Alert system - @everyone alerts for:
+ * - Connection to Uptime Kuma lost (30s grace period)
+ * - Monitor goes DOWN
+ * - Monitor recovers (UP after DOWN)
+ *
+ * Each alert type can be toggled via /setup alerts-toggle.
  */
 
 import {
@@ -16,40 +18,51 @@ import { kuma, MonitorStatus, statusEmoji, type KumaMonitor, type KumaHeartbeat 
 import { discordQueue } from "../queue/index.js";
 
 const ALERT_CHANNEL_KEY = "ALERT_CHANNEL_ID";
+const DISCONNECT_GRACE_MS = 30_000;
 
 let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
-const DISCONNECT_GRACE_SECONDS = 30; // Wait 30s before alerting about disconnect
+let wasDisconnected = false;
+
+function isEnabled(type: string): boolean {
+  return getSetting(`ALERT_${type.toUpperCase()}_ENABLED`) !== "false";
+}
 
 export function startAlerts(client: Client): void {
-  // Connection loss alert
+  // ---- Connection loss ----
   kuma.on("disconnected", (reason) => {
-    // Start a grace timer - don't alert on brief reconnects
     if (disconnectTimer) clearTimeout(disconnectTimer);
     disconnectTimer = setTimeout(() => {
+      wasDisconnected = true;
+      if (!isEnabled("disconnect")) return;
       sendDisconnectAlert(client, reason).catch((err) =>
         logger.error({ err }, "Failed to send disconnect alert")
       );
-    }, DISCONNECT_GRACE_SECONDS * 1000);
+    }, DISCONNECT_GRACE_MS);
   });
 
   kuma.on("connected", () => {
-    // Cancel pending disconnect alert if we reconnected in time
     if (disconnectTimer) {
       clearTimeout(disconnectTimer);
       disconnectTimer = null;
-      logger.info("Reconnected within grace period, no disconnect alert sent");
+    }
+    if (wasDisconnected) {
+      wasDisconnected = false;
+      // Send reconnected notice
+      sendReconnectedAlert(client).catch((err) =>
+        logger.error({ err }, "Failed to send reconnected alert")
+      );
     }
   });
 
-  // Monitor status change alerts
+  // ---- Monitor status changes ----
   kuma.on("statusChange", (monitor: KumaMonitor, heartbeat: KumaHeartbeat, previousStatus: number | undefined) => {
-    if (heartbeat.status === MonitorStatus.DOWN) {
+    if (heartbeat.status === MonitorStatus.DOWN && isEnabled("down")) {
       sendDownAlert(client, monitor, heartbeat).catch((err) =>
-        logger.error({ err }, "Failed to send down alert")
+        logger.error({ err, monitorId: monitor.id }, "Failed to send down alert")
       );
-    } else if (heartbeat.status === MonitorStatus.UP && previousStatus === MonitorStatus.DOWN) {
+    } else if (heartbeat.status === MonitorStatus.UP && previousStatus === MonitorStatus.DOWN && isEnabled("recovery")) {
       sendRecoveryAlert(client, monitor, heartbeat).catch((err) =>
-        logger.error({ err }, "Failed to send recovery alert")
+        logger.error({ err, monitorId: monitor.id }, "Failed to send recovery alert")
       );
     }
   });
@@ -57,10 +70,7 @@ export function startAlerts(client: Client): void {
 
 async function getAlertChannel(client: Client): Promise<TextChannel | null> {
   const channelId = getSetting(ALERT_CHANNEL_KEY);
-  if (!channelId) {
-    logger.debug("No alert channel configured (set via /setup alerts)");
-    return null;
-  }
+  if (!channelId) return null;
 
   try {
     const channel = await client.channels.fetch(channelId) as TextChannel | null;
@@ -78,47 +88,61 @@ async function sendDisconnectAlert(client: Client, reason: string): Promise<void
   const embed = new EmbedBuilder()
     .setTitle("\u{1F6A8} UPTIME KUMA DISCONNECTED")
     .setDescription(
-      `Lost connection to Uptime Kuma.\n\n` +
+      `Lost connection to Uptime Kuma for over 30 seconds.\n\n` +
       `**Reason:** ${reason}\n` +
       `**Impact:** Monitor status is unknown - services may be down without detection.\n\n` +
       `Check Uptime Kuma immediately.`
     )
-    .setColor(0xe74c3c) // red
+    .setColor(0xe74c3c)
     .setTimestamp(new Date());
 
   await discordQueue.add(async () => {
-    await channel.send({
-      content: "@everyone",
-      embeds: [embed],
-    });
+    await channel.send({ content: "@everyone", embeds: [embed] });
   });
+  logger.warn("Sent disconnect alert");
+}
 
-  logger.warn("Sent disconnect alert to Discord");
+async function sendReconnectedAlert(client: Client): Promise<void> {
+  const channel = await getAlertChannel(client);
+  if (!channel) return;
+
+  const summary = kuma.getSummary();
+  const embed = new EmbedBuilder()
+    .setTitle("\u{1F7E2} Uptime Kuma Reconnected")
+    .setDescription(
+      `Connection restored.\n\n` +
+      `**Status:** ${summary.up}/${summary.active} services up` +
+      (summary.down > 0 ? `\n**\u{1F534} ${summary.down} service${summary.down > 1 ? "s" : ""} currently down**` : "")
+    )
+    .setColor(summary.down > 0 ? 0xe74c3c : 0x2ecc71)
+    .setTimestamp(new Date());
+
+  await discordQueue.add(async () => {
+    await channel.send({ embeds: [embed] });
+  });
+  logger.info("Sent reconnected alert");
 }
 
 async function sendDownAlert(client: Client, monitor: KumaMonitor, heartbeat: KumaHeartbeat): Promise<void> {
   const channel = await getAlertChannel(client);
   if (!channel) return;
 
+  const target = monitor.url || monitor.hostname || "N/A";
   const embed = new EmbedBuilder()
     .setTitle(`${statusEmoji(MonitorStatus.DOWN)} ${monitor.name} is DOWN`)
     .setDescription(
       `**Type:** ${monitor.type}\n` +
-      `**URL:** ${monitor.url || monitor.hostname || "N/A"}\n` +
-      `**Message:** ${heartbeat.msg || "No details"}\n` +
-      `**Time:** <t:${Math.floor(new Date(heartbeat.time).getTime() / 1000)}:R>`
+      `**Target:** ${target}\n` +
+      `**Error:** ${heartbeat.msg || "No details"}\n` +
+      `**Detected:** <t:${Math.floor(new Date(heartbeat.time).getTime() / 1000)}:R>`
     )
-    .setColor(0xe74c3c) // red
+    .setColor(0xe74c3c)
     .setTimestamp(new Date(heartbeat.time));
 
   await discordQueue.add(async () => {
-    await channel.send({
-      content: "@everyone",
-      embeds: [embed],
-    });
+    await channel.send({ content: "@everyone", embeds: [embed] });
   });
-
-  logger.warn({ monitorId: monitor.id, name: monitor.name }, "Sent DOWN alert");
+  logger.warn({ monitorId: monitor.id, name: monitor.name, msg: heartbeat.msg }, "Sent DOWN alert");
 }
 
 async function sendRecoveryAlert(client: Client, monitor: KumaMonitor, heartbeat: KumaHeartbeat): Promise<void> {
@@ -126,21 +150,18 @@ async function sendRecoveryAlert(client: Client, monitor: KumaMonitor, heartbeat
   if (!channel) return;
 
   const ping = heartbeat.ping ? ` (${heartbeat.ping}ms)` : "";
-
   const embed = new EmbedBuilder()
     .setTitle(`${statusEmoji(MonitorStatus.UP)} ${monitor.name} is back UP`)
     .setDescription(
       `**Type:** ${monitor.type}\n` +
-      `**URL:** ${monitor.url || monitor.hostname || "N/A"}\n` +
-      `**Message:** ${heartbeat.msg || "OK"}${ping}\n` +
+      `**Response:** ${heartbeat.msg || "OK"}${ping}\n` +
       `**Recovered:** <t:${Math.floor(new Date(heartbeat.time).getTime() / 1000)}:R>`
     )
-    .setColor(0x2ecc71) // green
+    .setColor(0x2ecc71)
     .setTimestamp(new Date(heartbeat.time));
 
   await discordQueue.add(async () => {
     await channel.send({ embeds: [embed] });
   });
-
   logger.info({ monitorId: monitor.id, name: monitor.name }, "Sent recovery alert");
 }

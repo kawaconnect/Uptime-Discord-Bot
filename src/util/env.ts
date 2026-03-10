@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 const envSchema = z.object({
+  // Discord
   DISCORD_TOKEN: z.string().min(1),
   DISCORD_CLIENT_ID: z.string().min(1),
   DISCORD_GUILD_ID: z.string().min(1),
@@ -11,8 +12,10 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(3100),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 
-  // Uptime Kuma connection
-  KUMA_URL: z.string().url(),
+  // Uptime Kuma - Socket.IO requires username/password auth.
+  // API keys (uk1_xxx format) only work with Kuma's REST /api endpoints,
+  // NOT with the Socket.IO real-time API that this bot uses.
+  KUMA_URL: z.string().min(1),
   KUMA_USERNAME: z.string().min(1),
   KUMA_PASSWORD: z.string().min(1),
 });

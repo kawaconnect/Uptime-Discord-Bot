@@ -12,7 +12,15 @@ import { startAlerts } from "./services/alerts.js";
 import { startPresence } from "./services/presence.js";
 import { setupCommand } from "./commands/setup.js";
 import { helpCommand } from "./commands/help.js";
-import { statusCommand, monitorsCommand, monitorCommand } from "./commands/status.js";
+import {
+  statusCommand,
+  monitorsCommand,
+  monitorCommand,
+  pauseCommand,
+  resumeCommand,
+  downtimeCommand,
+  refreshCommand,
+} from "./commands/status.js";
 
 let server: Awaited<ReturnType<typeof startWebServer>> | null = null;
 
@@ -24,6 +32,10 @@ async function deployCommands() {
     statusCommand.toJSON(),
     monitorsCommand.toJSON(),
     monitorCommand.toJSON(),
+    pauseCommand.toJSON(),
+    resumeCommand.toJSON(),
+    downtimeCommand.toJSON(),
+    refreshCommand.toJSON(),
   ];
 
   const rest = new REST().setToken(config.DISCORD_TOKEN);
@@ -48,49 +60,39 @@ async function deployCommands() {
 }
 
 async function main() {
-  // 1. Validate environment
   loadEnv();
   logger.info("Environment validated");
 
-  // 2. Initialize SQLite
   const dbPath = join(process.cwd(), "data", "bot.db");
   initDb(dbPath);
 
-  // 3. Create Discord client and login
   const client = createClient();
   await client.login(env().DISCORD_TOKEN);
 
-  // 4. Deploy slash commands
   await deployCommands();
 
-  // 5. Start health check HTTP server
   server = await startWebServer();
 
-  // 6. Connect to Uptime Kuma
+  // Connect to Uptime Kuma
   kuma.connect();
 
-  // 7. Wait for initial connection before starting services
+  // Start services once connected
   kuma.once("connected", () => {
     logger.info("Uptime Kuma connected - starting services");
 
-    // 8. Start auto-updating status board
     startStatusBoard(client);
-
-    // 9. Start alert system
     startAlerts(client);
-
-    // 10. Start bot presence updates
     startPresence(client);
 
-    // Post initial status board after a brief delay (let monitors populate)
+    // Initial status board after monitors populate
     setTimeout(() => {
       updateStatusBoard(client).catch((err) =>
-        logger.warn({ err }, "Failed initial status board update")
+        logger.warn({ err }, "Initial status board update failed")
       );
     }, 5_000);
   });
 
-  logger.info("Bot fully started - waiting for Uptime Kuma connection");
+  logger.info("Bot started - waiting for Uptime Kuma connection");
 }
 
 // ---------------------------------------------------------------
@@ -99,13 +101,8 @@ async function main() {
 
 async function shutdown(signal: string) {
   logger.info({ signal }, "Shutting down");
-
   kuma.disconnect();
-
-  if (server) {
-    try { await server.close(); } catch { /* ignore */ }
-  }
-
+  if (server) { try { await server.close(); } catch { /* ignore */ } }
   closeDb();
   logger.flush();
   process.exit(0);
