@@ -145,6 +145,8 @@ class KumaClient extends EventEmitter {
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private _reconnectCount = 0;
   private _wasStale = false;
+  /** Guard against emitting 'connected' multiple times per connection cycle. */
+  private _emittedConnected = false;
 
   /** Event counters for debugging. */
   private _eventCounts = {
@@ -186,6 +188,15 @@ class KumaClient extends EventEmitter {
   get dataStale(): boolean { return this.heartbeatStale; }
   get dataStalenessSeconds(): number { return this.heartbeatStalenessSeconds; }
 
+  private emitConnectedOnce(): void {
+    if (this._emittedConnected) {
+      logger.info("Skipping duplicate connected emit");
+      return;
+    }
+    this._emittedConnected = true;
+    this.emit("connected");
+  }
+
   connect(): void {
     const config = env();
     const url = config.KUMA_URL;
@@ -226,6 +237,7 @@ class KumaClient extends EventEmitter {
       const wasAuthenticated = this._authenticated;
       this._connected = false;
       this._authenticated = false;
+      this._emittedConnected = false;
       if (wasAuthenticated) {
         this.emit("disconnected", reason);
       }
@@ -239,7 +251,7 @@ class KumaClient extends EventEmitter {
       logger.info("Auto-login (no auth required)");
       this._authenticated = true;
       this._lastDataAt = Date.now();
-      this.emit("connected");
+      this.emitConnectedOnce();
     });
 
     // ---- Data events ----
@@ -250,7 +262,7 @@ class KumaClient extends EventEmitter {
       if (!this._authenticated) {
         logger.info("Received data - implicitly authenticated");
         this._authenticated = true;
-        this.emit("connected");
+        this.emitConnectedOnce();
       }
       const count = Object.keys(data).length;
       logger.info({ monitors: count }, "monitorList received");
@@ -426,6 +438,7 @@ class KumaClient extends EventEmitter {
     this._lastDataAt = 0;
     this._authenticated = false;
     this._connected = false;
+    this._emittedConnected = false;
     // Reset event counters
     for (const key of Object.keys(this._eventCounts) as Array<keyof typeof this._eventCounts>) {
       this._eventCounts[key] = 0;
@@ -448,7 +461,7 @@ class KumaClient extends EventEmitter {
           logger.info("Re-authenticated with saved token");
           this._authenticated = true;
           this._lastDataAt = Date.now();
-          this.emit("connected");
+          this.emitConnectedOnce();
         } else {
           logger.warn({ msg: res.msg }, "Token expired, using password");
           this._jwtToken = null;
@@ -474,7 +487,7 @@ class KumaClient extends EventEmitter {
         this._jwtToken = res.token ?? null;
         this._authenticated = true;
         this._lastDataAt = Date.now();
-        this.emit("connected");
+        this.emitConnectedOnce();
       } else {
         logger.error({ msg: res.msg }, "Login failed - check KUMA_USERNAME and KUMA_PASSWORD");
       }

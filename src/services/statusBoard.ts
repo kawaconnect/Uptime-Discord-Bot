@@ -26,6 +26,8 @@ const REFRESH_INTERVAL_MS = 15_000;
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let needsReanchor = false;
+/** Mutex - prevents concurrent updateStatusBoard calls from racing. */
+let updating = false;
 
 export function startStatusBoard(client: Client): void {
   // Status changes get an immediate update
@@ -78,6 +80,21 @@ export function stopStatusBoard(): void {
 }
 
 export async function updateStatusBoard(client: Client): Promise<void> {
+  // Mutex - if another update is in progress, skip to avoid creating duplicate messages
+  if (updating) {
+    logger.info("Skipping board update - another update in progress");
+    return;
+  }
+  updating = true;
+
+  try {
+    await doUpdateStatusBoard(client);
+  } finally {
+    updating = false;
+  }
+}
+
+async function doUpdateStatusBoard(client: Client): Promise<void> {
   const channelId = getSetting(STATUS_CHANNEL_KEY);
   if (!channelId) return;
 
