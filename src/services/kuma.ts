@@ -201,15 +201,17 @@ class KumaClient extends EventEmitter {
           this._latestStatus.set(Number(idStr), beats[beats.length - 1].status);
         }
       }
+      // Re-emit so presence/status board recalculates with actual status data
+      this.emit("monitorListUpdated", this._monitors);
     });
 
     this.socket.on("importantHeartbeatList", (data: Record<string, KumaHeartbeat[]>) => {
-      // Stored for future use (incident history etc.)
       for (const [idStr, beats] of Object.entries(data)) {
         if (beats.length > 0) {
           this._latestStatus.set(Number(idStr), beats[beats.length - 1].status);
         }
       }
+      this.emit("monitorListUpdated", this._monitors);
     });
 
     this.socket.on("avgPing", (data: Record<string, number>) => {
