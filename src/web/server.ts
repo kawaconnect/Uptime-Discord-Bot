@@ -1,30 +1,27 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import { env } from "../util/env.js";
 import { logger } from "../util/logger.js";
-import { kuma } from "../services/kuma.js";
+import { kuma, statusLabel } from "../services/kuma.js";
 
 export async function startWebServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
 
-  // Liveness probe
   app.get("/healthz", async () => ({ ok: true }));
 
-  // Readiness probe - checks Kuma connectivity AND data freshness
   app.get("/readyz", async (_req, reply) => {
     if (!kuma.connected) {
       return reply.code(503).send({ ok: false, error: "Not connected to Uptime Kuma" });
     }
-    if (kuma.dataStale) {
+    if (kuma.heartbeatStale) {
       return reply.code(503).send({
         ok: false,
-        error: "Data stale - no events from Kuma",
-        staleSec: kuma.dataStalenessSeconds,
+        error: "Heartbeats stale",
+        hbStaleSec: kuma.heartbeatStalenessSeconds,
       });
     }
     return { ok: true };
   });
 
-  // Debug endpoint: current monitor summary + connection health
   app.get("/debug/status", async () => {
     const summary = kuma.getSummary();
     const monitors: Record<string, unknown>[] = [];
@@ -36,17 +33,19 @@ export async function startWebServer(): Promise<FastifyInstance> {
         type: monitor.type,
         active: monitor.active,
         status: kuma.latestStatus.get(id),
+        statusLabel: statusLabel(kuma.latestStatus.get(id) ?? -1),
         avgPing: kuma.avgPing.get(id),
       });
     }
 
     return {
       connected: kuma.connected,
-      dataStale: kuma.dataStale,
-      dataStalenessSeconds: kuma.dataStalenessSeconds,
-      lastDataAt: kuma.lastDataAt > 0 ? new Date(kuma.lastDataAt).toISOString() : null,
+      heartbeatStale: kuma.heartbeatStale,
+      heartbeatStalenessSeconds: kuma.heartbeatStalenessSeconds,
       lastHeartbeatAt: kuma.lastHeartbeatAt > 0 ? new Date(kuma.lastHeartbeatAt).toISOString() : null,
+      lastDataAt: kuma.lastDataAt > 0 ? new Date(kuma.lastDataAt).toISOString() : null,
       reconnectCount: kuma.reconnectCount,
+      eventCounts: kuma.eventCounts,
       summary,
       monitors,
       serverInfo: kuma.serverInfo,

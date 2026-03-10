@@ -1,14 +1,9 @@
 /**
- * Status board - a persistent message in a configured channel that shows
- * the current state of all monitors, auto-updated on every heartbeat.
+ * Status board - persistent message showing all monitor states.
+ * Refreshes every 15 seconds. Period.
  *
- * The message always stays at the bottom of the channel:
- *  - If the bot's message is already the last message, edit it in place.
- *  - If someone posts below it, delete the old one and re-send (silent).
- *
- * Safety net: A periodic refresh timer (every 60s) updates the board even
- * if Kuma stops sending events.  This guarantees the board is never more
- * than ~60s stale.
+ * If heartbeats are stale (>90s), forces a reconnect on every refresh
+ * cycle until data flows again.
  */
 
 import {
@@ -26,39 +21,24 @@ import { discordQueue } from "../queue/index.js";
 const STATUS_CHANNEL_KEY = "STATUS_CHANNEL_ID";
 const STATUS_MSG_KEY = "STATUS_MESSAGE_ID";
 
-/** How often (ms) to force-refresh the board regardless of events. */
-const REFRESH_INTERVAL_MS = 60_000; // 60 seconds
+/** Refresh the board every 15 seconds no matter what. */
+const REFRESH_INTERVAL_MS = 15_000;
 
-let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
-let pendingUpdate = false;
 let needsReanchor = false;
 
-/**
- * Start listening for kuma events and auto-update the status board.
- * Debounces updates to avoid spamming Discord on rapid heartbeats.
- */
 export function startStatusBoard(client: Client): void {
-  kuma.on("heartbeat", () => {
-    scheduleUpdate(client);
-  });
-
-  kuma.on("monitorListUpdated", () => {
-    scheduleUpdate(client);
-  });
-
+  // Status changes get an immediate update
   kuma.on("statusChange", () => {
-    // Status changes get an immediate update
+    logger.info("statusChange event - immediate board update");
     updateStatusBoard(client).catch((err) =>
       logger.warn({ err }, "Failed to update status board on status change")
     );
   });
 
-  // When Kuma reconnects (after watchdog or network issue), force an
-  // immediate board update once fresh data arrives.
+  // Reconnect = immediate update after data arrives
   kuma.on("connected", () => {
-    logger.info("Kuma reconnected - scheduling immediate status board update");
-    // Small delay to let monitorList/heartbeatList data arrive first
+    logger.info("Kuma connected - scheduling board update in 5s");
     setTimeout(() => {
       updateStatusBoard(client).catch((err) =>
         logger.warn({ err }, "Failed to update status board after reconnect")
@@ -66,54 +46,43 @@ export function startStatusBoard(client: Client): void {
     }, 5_000);
   });
 
-  // Watch for new messages in the status channel - if someone posts below
-  // the status message, flag it for re-anchoring on the next update.
+  // Watch for messages in status channel - flag for re-anchor
   client.on(Events.MessageCreate, (msg) => {
     if (msg.author.bot) return;
     const channelId = getSetting(STATUS_CHANNEL_KEY);
     if (!channelId || msg.channelId !== channelId) return;
     needsReanchor = true;
-    scheduleUpdate(client);
   });
 
-  // Periodic refresh - guarantees the board is never more than 60s stale
-  // even if Kuma completely stops sending events.
+  // MAIN LOOP: refresh every 15 seconds unconditionally
   refreshTimer = setInterval(() => {
+    // If heartbeats are stale, force reconnect to get fresh data
+    if (kuma.heartbeatStale && kuma.connected) {
+      const staleSec = kuma.heartbeatStalenessSeconds;
+      logger.warn({ staleSec }, "Heartbeats stale on refresh - forcing reconnect");
+      kuma.forceReconnect();
+      // Don't update board this cycle - let reconnect populate data first
+      return;
+    }
+
     updateStatusBoard(client).catch((err) =>
       logger.warn({ err }, "Failed periodic status board refresh")
     );
   }, REFRESH_INTERVAL_MS);
 
-  logger.info({ refreshIntervalMs: REFRESH_INTERVAL_MS }, "Status board periodic refresh started");
+  logger.info({ refreshMs: REFRESH_INTERVAL_MS }, "Status board started - refreshing every 15s");
 }
 
 export function stopStatusBoard(): void {
-  if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-}
-
-function scheduleUpdate(client: Client): void {
-  if (pendingUpdate) return;
-  pendingUpdate = true;
-
-  if (updateTimer) clearTimeout(updateTimer);
-  updateTimer = setTimeout(() => {
-    pendingUpdate = false;
-    updateStatusBoard(client).catch((err) =>
-      logger.warn({ err }, "Failed to update status board")
-    );
-  }, 10_000); // Debounce to 10 seconds
 }
 
 export async function updateStatusBoard(client: Client): Promise<void> {
   const channelId = getSetting(STATUS_CHANNEL_KEY);
   if (!channelId) return;
 
-  // Don't skip when kuma.connected is false - if the watchdog just triggered
-  // a reconnect, we still want to show the stale warning on the board.
-  // Only skip if we have zero monitors (never connected at all).
   if (kuma.monitors.size === 0 && !kuma.connected) {
-    logger.debug("Skipping status board update - no data and not connected");
+    logger.info("Skipping board update - no data and not connected");
     return;
   }
 
@@ -123,21 +92,22 @@ export async function updateStatusBoard(client: Client): Promise<void> {
     return;
   }
 
+  const summary = kuma.getSummary();
+  logger.info(
+    { up: summary.up, down: summary.down, total: summary.total, stale: kuma.heartbeatStale },
+    "Updating status board"
+  );
+
   const embed = buildStatusEmbed();
   const oldMsgId = getSetting(STATUS_MSG_KEY);
 
-  // Check if our message is already the last in the channel
   if (oldMsgId) {
     try {
-      // Use the REST API directly to bypass Discord.js cache
       const lastMessages = await channel.messages.fetch({ limit: 1, cache: false });
       const lastMsg = lastMessages.first();
       const isAtBottom = lastMsg?.id === oldMsgId;
 
-      logger.debug({ oldMsgId, lastMsgId: lastMsg?.id, isAtBottom }, "Status board position check");
-
       if (isAtBottom) {
-        // Already at the bottom - just edit in place
         await discordQueue.add(async () => {
           await lastMsg!.edit({ embeds: [embed] });
         });
@@ -145,8 +115,8 @@ export async function updateStatusBoard(client: Client): Promise<void> {
         return;
       }
 
-      // Not at the bottom - delete and re-send
-      logger.info({ oldMsgId, lastMsgId: lastMsg?.id }, "Re-anchoring status board to bottom");
+      // Not at bottom - delete and re-send
+      logger.info("Re-anchoring status board to bottom");
       try {
         const oldMsg = await channel.messages.fetch(oldMsgId);
         await discordQueue.add(async () => { await oldMsg.delete(); });
@@ -164,7 +134,7 @@ export async function updateStatusBoard(client: Client): Promise<void> {
     const msg = await discordQueue.add(async () =>
       channel.send({
         embeds: [embed],
-        flags: 4096, // SUPPRESS_NOTIFICATIONS - no beep
+        flags: 4096,
       } as any)
     ) as Message | undefined;
 
@@ -181,9 +151,7 @@ function buildStatusEmbed(): EmbedBuilder {
   const latestStatus = kuma.latestStatus;
   const summary = kuma.getSummary();
 
-  // Group monitors by parent (groups) or flat
   const groups = new Map<number | null, KumaMonitor[]>();
-
   for (const [, monitor] of monitors) {
     const parentId = monitor.parent ?? null;
     if (!groups.has(parentId)) groups.set(parentId, []);
@@ -191,17 +159,12 @@ function buildStatusEmbed(): EmbedBuilder {
   }
 
   const lines: string[] = [];
-
-  // Top-level monitors (no parent)
   const topLevel = groups.get(null) ?? [];
   topLevel.sort((a, b) => a.name.localeCompare(b.name));
 
   for (const monitor of topLevel) {
-    // Check if this monitor is a group parent
     const children = groups.get(monitor.id);
-
     if (children && children.length > 0) {
-      // Group header
       lines.push(`\n**${monitor.name}**`);
       children.sort((a, b) => a.name.localeCompare(b.name));
       for (const child of children) {
@@ -216,20 +179,17 @@ function buildStatusEmbed(): EmbedBuilder {
   if (description.length > 4000) {
     description = description.slice(0, 3950) + `\n\n*... and more (${monitors.size} total)*`;
   }
-
   if (description.length === 0) {
     description = "No monitors configured.";
   }
 
-  // Overall color: green if all up, red if any down, yellow if pending
-  let color = 0x2ecc71; // green
-  if (summary.down > 0) color = 0xe74c3c; // red
-  else if (summary.pending > 0) color = 0xf39c12; // yellow
-  else if (summary.maintenance > 0) color = 0x3498db; // blue
+  let color = 0x2ecc71;
+  if (summary.down > 0) color = 0xe74c3c;
+  else if (summary.pending > 0) color = 0xf39c12;
+  else if (summary.maintenance > 0) color = 0x3498db;
 
-  // If data is stale, override to orange warning
-  const stale = kuma.dataStale;
-  if (stale) color = 0xff6600; // orange - stale data warning
+  const stale = kuma.heartbeatStale;
+  if (stale) color = 0xff6600;
 
   const headerParts: string[] = [
     `${statusEmoji(MonitorStatus.UP)} **${summary.up}** up`,
@@ -239,7 +199,6 @@ function buildStatusEmbed(): EmbedBuilder {
   if (summary.maintenance > 0) headerParts.push(`${statusEmoji(MonitorStatus.MAINTENANCE)} **${summary.maintenance}** maintenance`);
   if (summary.paused > 0) headerParts.push(`\u23F8\uFE0F **${summary.paused}** paused`);
 
-  // Show both bot timezone and user's local time (Discord renders <t:> in viewer's tz)
   const now = new Date();
   const unixTs = Math.floor(now.getTime() / 1000);
   const tz = getSetting("TIMEZONE");
@@ -255,34 +214,30 @@ function buildStatusEmbed(): EmbedBuilder {
     botTimeStr ? `Bot time: **${botTimeStr}** (${tz})` : "",
   ].filter(Boolean).join("\n");
 
-  // Stale data warning
   let staleWarning = "";
   if (stale) {
-    const staleSecs = kuma.dataStalenessSeconds;
+    const staleSecs = kuma.heartbeatStalenessSeconds;
     const staleStr = staleSecs > 120
       ? `${Math.floor(staleSecs / 60)}m ${staleSecs % 60}s`
       : `${staleSecs}s`;
-    staleWarning = `\n\n\u26A0\uFE0F **Data may be stale** - no update from Kuma in ${staleStr}. Reconnecting...`;
+    staleWarning = `\n\n\u26A0\uFE0F **Data may be stale** - no heartbeat from Kuma in ${staleStr}. Reconnecting...`;
   }
 
   return new EmbedBuilder()
     .setTitle(`Service Status (${summary.up}/${summary.total - summary.paused})`)
     .setDescription(`${headerParts.join("  |  ")}\n${description}${timeLines}${staleWarning}`)
     .setColor(color)
-    .setFooter({ text: stale ? "Data may be stale - reconnecting to Kuma" : "Auto-updates every 60s" });
+    .setFooter({ text: stale ? "Data may be stale - reconnecting to Kuma" : "Refreshes every 15s" });
 }
 
 function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, number>): string {
   if (!monitor.active) {
     return `\u23F8\uFE0F ${monitor.name} - *paused*`;
   }
-
   const status = latestStatus.get(monitor.id);
   const emoji = status !== undefined ? statusEmoji(status) : "\u26AA";
   const label = status !== undefined ? statusLabel(status) : "UNKNOWN";
-
   const ping = kuma.avgPing.get(monitor.id);
   const pingStr = ping !== undefined && ping > 0 ? ` (${Math.round(ping)}ms)` : "";
-
   return `${emoji} ${monitor.name} - ${label}${pingStr}`;
 }

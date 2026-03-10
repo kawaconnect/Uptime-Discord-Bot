@@ -1,17 +1,15 @@
 /**
  * Uptime Kuma Socket.IO client - persistent real-time connection.
  *
- * Uptime Kuma exposes its API exclusively via Socket.IO (not REST).
- * Authentication requires username/password; API keys (uk1_xxx) are
- * REST-only (/metrics endpoint) and cannot be used here.
+ * ARCHITECTURE:
+ * Kuma v2 pushes monitorList + heartbeatList on connect, then is SUPPOSED
+ * to send real-time `heartbeat` events. In practice, heartbeats silently
+ * stop while avgPing/uptime events keep flowing - making naive "last data"
+ * checks useless.
  *
- * After login the server pushes all state automatically:
- *   monitorList, heartbeatList, importantHeartbeatList, avgPing, uptime, info
- * Then sends real-time `heartbeat` events for every check.
- *
- * KNOWN ISSUE: Kuma v2 silently stops sending heartbeat events after the
- * initial data dump while the socket stays open.  A watchdog timer detects
- * this and forces a full reconnect to get fresh data.
+ * Solution: Track heartbeats separately. If no heartbeat in HEARTBEAT_TIMEOUT,
+ * force a full reconnect to get fresh heartbeatList data. The periodic refresh
+ * in statusBoard.ts also triggers reconnects when heartbeats go stale.
  */
 
 import { io, Socket } from "socket.io-client";
@@ -97,22 +95,22 @@ export interface KumaClientEvents {
   monitorListUpdated: [monitors: Map<number, KumaMonitor>];
   statusChange: [monitor: KumaMonitor, heartbeat: KumaHeartbeat, previousStatus: number | undefined];
   heartbeat: [heartbeat: KumaHeartbeat];
-  /** Fired when the watchdog detects no data for >2 min (before reconnect). */
   dataStale: [stalenessMs: number];
-  /** Fired when fresh data arrives after a stale period. */
   dataFresh: [];
 }
 
 // ---------------------------------------------------------------
-// Client
+// Timings
 // ---------------------------------------------------------------
 
-/** No data received in this long = stale, force reconnect. */
-const DATA_TIMEOUT_MS = 120_000; // 2 minutes
-/** How often the watchdog checks for staleness. */
-const WATCHDOG_INTERVAL_MS = 30_000; // 30 seconds
-/** Warn (but don't reconnect) after this long without data. */
-const DATA_WARN_MS = 60_000; // 1 minute
+/** Force reconnect if no heartbeat event in this long. */
+const HEARTBEAT_TIMEOUT_MS = 90_000; // 90 seconds
+/** Watchdog check interval. */
+const WATCHDOG_INTERVAL_MS = 15_000; // 15 seconds
+
+// ---------------------------------------------------------------
+// Client
+// ---------------------------------------------------------------
 
 class KumaClient extends EventEmitter {
   private socket: Socket | null = null;
@@ -124,13 +122,29 @@ class KumaClient extends EventEmitter {
   private _authenticated = false;
   private _jwtToken: string | null = null;
   private _info: { version?: string; serverTimezone?: string } = {};
+
+  /** Last time we got a real heartbeat event (status-bearing). */
   private _lastHeartbeatAt = 0;
-  /** Timestamp of ANY data event from Kuma (heartbeat, monitorList, heartbeatList, etc). */
+  /** Last time we got ANY data event. */
   private _lastDataAt = 0;
+  /** Last time heartbeatList (bulk) arrived - counts as heartbeat. */
+  private _lastHeartbeatListAt = 0;
+
   private _statusUpdateTimer: ReturnType<typeof setTimeout> | null = null;
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private _reconnectCount = 0;
   private _wasStale = false;
+
+  /** Event counters for debugging. */
+  private _eventCounts = {
+    heartbeat: 0,
+    heartbeatList: 0,
+    monitorList: 0,
+    avgPing: 0,
+    uptime: 0,
+    info: 0,
+    statusChange: 0,
+  };
 
   get monitors(): Map<number, KumaMonitor> { return this._monitors; }
   get latestStatus(): Map<number, number> { return this._latestStatus; }
@@ -138,30 +152,28 @@ class KumaClient extends EventEmitter {
   get uptime24h(): Map<number, number> { return this._uptime24h; }
   get connected(): boolean { return this._connected && this._authenticated; }
   get serverInfo() { return this._info; }
-  get lastHeartbeatAt(): number { return this._lastHeartbeatAt; }
+  get lastHeartbeatAt(): number { return Math.max(this._lastHeartbeatAt, this._lastHeartbeatListAt); }
   get lastDataAt(): number { return this._lastDataAt; }
   get reconnectCount(): number { return this._reconnectCount; }
+  get eventCounts() { return { ...this._eventCounts }; }
 
-  /** True if authenticated but haven't received any data in DATA_TIMEOUT_MS. */
-  get dataStale(): boolean {
-    if (!this._authenticated || this._lastDataAt === 0) return false;
-    return Date.now() - this._lastDataAt > DATA_TIMEOUT_MS;
+  /** Seconds since last heartbeat or heartbeatList event. */
+  get heartbeatStalenessSeconds(): number {
+    const last = this.lastHeartbeatAt;
+    if (last === 0) return -1;
+    return Math.floor((Date.now() - last) / 1000);
   }
 
-  /** Seconds since last data event, or -1 if no data ever received. */
-  get dataStalenessSeconds(): number {
-    if (this._lastDataAt === 0) return -1;
-    return Math.floor((Date.now() - this._lastDataAt) / 1000);
+  /** True if heartbeats have stopped (even if other data flows). */
+  get heartbeatStale(): boolean {
+    const last = this.lastHeartbeatAt;
+    if (!this._authenticated || last === 0) return false;
+    return Date.now() - last > HEARTBEAT_TIMEOUT_MS;
   }
 
-  private touchData(): void {
-    this._lastDataAt = Date.now();
-    if (this._wasStale) {
-      this._wasStale = false;
-      logger.info("Data flowing again after stale period");
-      this.emit("dataFresh");
-    }
-  }
+  // Keep old names for compat with statusBoard/alerts/server
+  get dataStale(): boolean { return this.heartbeatStale; }
+  get dataStalenessSeconds(): number { return this.heartbeatStalenessSeconds; }
 
   connect(): void {
     const config = env();
@@ -176,10 +188,20 @@ class KumaClient extends EventEmitter {
       transports: ["websocket", "polling"],
     });
 
+    // Log ALL socket events for debugging
+    this.socket.onAny((event: string, ...args: unknown[]) => {
+      // Skip noisy events we already handle, but log unknown ones
+      const known = ["connect", "disconnect", "connect_error", "autoLogin",
+        "monitorList", "heartbeat", "heartbeatList", "importantHeartbeatList",
+        "avgPing", "uptime", "info"];
+      if (!known.includes(event)) {
+        logger.info({ event, argCount: args.length }, "Unknown socket event received");
+      }
+    });
+
     this.socket.on("connect", () => {
       logger.info("Socket.IO connected");
       this._connected = true;
-      // If credentials are configured, authenticate. Otherwise wait for autoLogin.
       const config = env();
       if (config.KUMA_USERNAME && config.KUMA_PASSWORD) {
         this.authenticate();
@@ -202,24 +224,25 @@ class KumaClient extends EventEmitter {
       logger.error({ err: err.message }, "Connection error");
     });
 
-    // Auto-login (auth disabled on Kuma side)
     this.socket.on("autoLogin", () => {
       logger.info("Auto-login (no auth required)");
       this._authenticated = true;
-      this.touchData();
+      this._lastDataAt = Date.now();
       this.emit("connected");
     });
 
-    // ---- Data events (pushed automatically after login) ----
+    // ---- Data events ----
 
     this.socket.on("monitorList", (data: Record<string, KumaMonitor>) => {
-      this.touchData();
-      // If we receive data, we're authenticated (even without explicit autoLogin)
+      this._lastDataAt = Date.now();
+      this._eventCounts.monitorList++;
       if (!this._authenticated) {
         logger.info("Received data - implicitly authenticated");
         this._authenticated = true;
         this.emit("connected");
       }
+      const count = Object.keys(data).length;
+      logger.info({ monitors: count }, "monitorList received");
       for (const [idStr, monitor] of Object.entries(data)) {
         this._monitors.set(Number(idStr), monitor);
       }
@@ -227,94 +250,143 @@ class KumaClient extends EventEmitter {
     });
 
     this.socket.on("heartbeat", (hb: KumaHeartbeat) => {
-      this.touchData();
+      this._lastDataAt = Date.now();
       this._lastHeartbeatAt = Date.now();
+      this._eventCounts.heartbeat++;
+
       const prevStatus = this._latestStatus.get(hb.monitor_id);
       this._latestStatus.set(hb.monitor_id, hb.status);
+
+      const monitor = this._monitors.get(hb.monitor_id);
+      const name = monitor?.name ?? `#${hb.monitor_id}`;
+
+      // Log every heartbeat - this is how we know it's working
+      logger.info(
+        { id: hb.monitor_id, name, status: statusLabel(hb.status), prev: prevStatus !== undefined ? statusLabel(prevStatus) : "none", ping: hb.ping },
+        "heartbeat"
+      );
+
       this.emit("heartbeat", hb);
 
-      // Detect status changes
       if (prevStatus !== undefined && prevStatus !== hb.status) {
-        const monitor = this._monitors.get(hb.monitor_id);
+        this._eventCounts.statusChange++;
+        logger.warn(
+          { id: hb.monitor_id, name, from: statusLabel(prevStatus), to: statusLabel(hb.status) },
+          "STATUS CHANGE"
+        );
         if (monitor) {
           this.emit("statusChange", monitor, hb, prevStatus);
         }
       }
+
+      // Clear stale flag if we were stale
+      if (this._wasStale) {
+        this._wasStale = false;
+        logger.info("Heartbeats flowing again after stale period");
+        this.emit("dataFresh");
+      }
     });
 
-    // Kuma v2 sends heartbeatList per-monitor: (monitorId, beats[], ...)
-    // Debounce the emit - all 20 monitors stream in rapidly on connect,
-    // so we wait until they stop arriving before updating presence/status.
     this.socket.on("heartbeatList", (monitorId: string, beats: KumaHeartbeat[]) => {
-      this.touchData();
+      this._lastDataAt = Date.now();
+      this._lastHeartbeatListAt = Date.now();
+      this._eventCounts.heartbeatList++;
+
       if (Array.isArray(beats) && beats.length > 0) {
-        this._latestStatus.set(Number(monitorId), beats[beats.length - 1].status);
+        const last = beats[beats.length - 1];
+        this._latestStatus.set(Number(monitorId), last.status);
+        const monitor = this._monitors.get(Number(monitorId));
+        logger.info(
+          { id: monitorId, name: monitor?.name, beats: beats.length, latestStatus: statusLabel(last.status) },
+          "heartbeatList"
+        );
       }
       this.scheduleStatusUpdate();
+
+      // Clear stale flag
+      if (this._wasStale) {
+        this._wasStale = false;
+        logger.info("HeartbeatList received after stale period");
+        this.emit("dataFresh");
+      }
     });
 
     this.socket.on("importantHeartbeatList", (monitorId: string, beats: KumaHeartbeat[]) => {
-      this.touchData();
+      this._lastDataAt = Date.now();
+      this._lastHeartbeatListAt = Date.now();
       if (Array.isArray(beats) && beats.length > 0) {
         this._latestStatus.set(Number(monitorId), beats[beats.length - 1].status);
       }
       this.scheduleStatusUpdate();
     });
 
-    // Kuma v2 sends per-monitor: (monitorId, value, ...)
     this.socket.on("avgPing", (monitorId: string, value: number) => {
-      this.touchData();
+      this._lastDataAt = Date.now();
+      this._eventCounts.avgPing++;
       this._avgPing.set(Number(monitorId), value);
     });
 
     this.socket.on("uptime", (monitorId: string, value: number) => {
-      this.touchData();
+      this._lastDataAt = Date.now();
+      this._eventCounts.uptime++;
       this._uptime24h.set(Number(monitorId), value);
     });
 
     this.socket.on("info", (info: Record<string, unknown>) => {
-      this.touchData();
+      this._lastDataAt = Date.now();
+      this._eventCounts.info++;
       this._info.version = info.version as string;
       this._info.serverTimezone = info.serverTimezone as string;
-      logger.info({ version: this._info.version, tz: this._info.serverTimezone }, "Uptime Kuma server info");
+      logger.info({ version: this._info.version, tz: this._info.serverTimezone }, "Kuma server info");
     });
 
-    // Start the watchdog
     this.startWatchdog();
   }
 
   // ---------------------------------------------------------------
-  // Watchdog - detects silent data loss and forces reconnect
+  // Watchdog - watches HEARTBEAT staleness specifically
   // ---------------------------------------------------------------
 
   private startWatchdog(): void {
     this.stopWatchdog();
-    let warnedAt = 0;
 
     this._watchdogTimer = setInterval(() => {
-      if (!this._authenticated || this._lastDataAt === 0) return;
+      if (!this._authenticated) return;
+      const lastHB = this.lastHeartbeatAt;
+      if (lastHB === 0) return;
 
-      const staleness = Date.now() - this._lastDataAt;
+      const staleness = Date.now() - lastHB;
 
-      if (staleness > DATA_TIMEOUT_MS) {
+      // Log status every check so we can see it in logs
+      const summary = this.getSummary();
+      logger.info(
+        {
+          hbStaleSec: Math.floor(staleness / 1000),
+          lastHB: new Date(lastHB).toISOString(),
+          up: summary.up,
+          down: summary.down,
+          events: this._eventCounts,
+        },
+        "WATCHDOG check"
+      );
+
+      if (staleness > HEARTBEAT_TIMEOUT_MS) {
         logger.error(
-          { stalenessMs: staleness, reconnectCount: this._reconnectCount },
-          "WATCHDOG: No data from Kuma in >2 min - forcing full reconnect"
+          { stalenessMs: staleness, reconnects: this._reconnectCount },
+          "WATCHDOG: No heartbeats in >90s - forcing reconnect"
         );
-        warnedAt = 0;
         if (!this._wasStale) {
           this._wasStale = true;
           this.emit("dataStale", staleness);
         }
         this.forceReconnect();
-      } else if (staleness > DATA_WARN_MS && warnedAt < this._lastDataAt) {
-        warnedAt = Date.now();
-        logger.warn(
-          { stalenessMs: staleness, lastDataAt: new Date(this._lastDataAt).toISOString() },
-          "WATCHDOG: No data from Kuma in >1 min - monitoring"
-        );
       }
     }, WATCHDOG_INTERVAL_MS);
+
+    logger.info(
+      { watchdogIntervalMs: WATCHDOG_INTERVAL_MS, heartbeatTimeoutMs: HEARTBEAT_TIMEOUT_MS },
+      "Watchdog started"
+    );
   }
 
   private stopWatchdog(): void {
@@ -326,28 +398,29 @@ class KumaClient extends EventEmitter {
 
   /**
    * Force a full disconnect + reconnect.
-   * Clears all in-memory state so fresh data from Kuma replaces it.
+   * Clears all in-memory state so Kuma re-pushes everything.
    */
   forceReconnect(): void {
     if (!this.socket) return;
 
     this._reconnectCount++;
-    logger.info({ reconnectCount: this._reconnectCount }, "Force reconnecting to Kuma");
+    logger.warn({ reconnects: this._reconnectCount }, "Force reconnecting to Kuma");
 
-    // Clear stale in-memory state - will be repopulated on reconnect
     this._monitors.clear();
     this._latestStatus.clear();
     this._avgPing.clear();
     this._uptime24h.clear();
     this._lastHeartbeatAt = 0;
+    this._lastHeartbeatListAt = 0;
     this._lastDataAt = 0;
     this._authenticated = false;
     this._connected = false;
+    // Reset event counters
+    for (const key of Object.keys(this._eventCounts) as Array<keyof typeof this._eventCounts>) {
+      this._eventCounts[key] = 0;
+    }
 
-    // Socket.IO's disconnect + connect cycle triggers re-auth,
-    // which causes Kuma to re-push all monitor data from scratch
     this.socket.disconnect();
-    // Small delay to avoid hammering - then reconnect
     setTimeout(() => {
       if (this.socket) {
         this.socket.connect();
@@ -363,7 +436,7 @@ class KumaClient extends EventEmitter {
         if (res.ok) {
           logger.info("Re-authenticated with saved token");
           this._authenticated = true;
-          this.touchData();
+          this._lastDataAt = Date.now();
           this.emit("connected");
         } else {
           logger.warn({ msg: res.msg }, "Token expired, using password");
@@ -389,7 +462,7 @@ class KumaClient extends EventEmitter {
         logger.info("Authenticated with Uptime Kuma");
         this._jwtToken = res.token ?? null;
         this._authenticated = true;
-        this.touchData();
+        this._lastDataAt = Date.now();
         this.emit("connected");
       } else {
         logger.error({ msg: res.msg }, "Login failed - check KUMA_USERNAME and KUMA_PASSWORD");
@@ -402,7 +475,7 @@ class KumaClient extends EventEmitter {
     this._statusUpdateTimer = setTimeout(() => {
       this._statusUpdateTimer = null;
       this.emit("monitorListUpdated", this._monitors);
-    }, 2_000); // Wait 2s for all per-monitor events to arrive
+    }, 2_000);
   }
 
   disconnect(): void {
@@ -416,7 +489,7 @@ class KumaClient extends EventEmitter {
   }
 
   // ---------------------------------------------------------------
-  // Actions (emit commands to Kuma)
+  // Actions
   // ---------------------------------------------------------------
 
   async pauseMonitor(monitorId: number): Promise<{ ok: boolean; msg?: string }> {
@@ -428,16 +501,14 @@ class KumaClient extends EventEmitter {
   }
 
   private emitAction(event: string, ...args: unknown[]): Promise<{ ok: boolean; msg?: string }> {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
       if (!this.socket || !this._authenticated) {
         resolve({ ok: false, msg: "Not connected" });
         return;
       }
-
       const timeout = setTimeout(() => {
         resolve({ ok: false, msg: "Timeout" });
       }, 10_000);
-
       this.socket.emit(event, ...args, (res: { ok: boolean; msg?: string }) => {
         clearTimeout(timeout);
         resolve(res);
@@ -480,13 +551,11 @@ class KumaClient extends EventEmitter {
     return result.sort((a, b) => a.monitor.name.localeCompare(b.monitor.name));
   }
 
-  /** Find monitors by name (case-insensitive partial match). */
   searchMonitors(query: string, limit = 25): KumaMonitor[] {
     const q = query.toLowerCase();
     return [...this._monitors.values()]
       .filter((m) => m.name.toLowerCase().includes(q))
       .sort((a, b) => {
-        // Exact start match first
         const aStarts = a.name.toLowerCase().startsWith(q) ? 0 : 1;
         const bStarts = b.name.toLowerCase().startsWith(q) ? 0 : 1;
         if (aStarts !== bStarts) return aStarts - bStarts;
