@@ -91,21 +91,24 @@ export async function updateStatusBoard(client: Client): Promise<void> {
   // Check if our message is already the last in the channel
   if (oldMsgId) {
     try {
-      const lastMessages = await channel.messages.fetch({ limit: 1 });
+      // Use the REST API directly to bypass Discord.js cache
+      const lastMessages = await channel.messages.fetch({ limit: 1, cache: false });
       const lastMsg = lastMessages.first();
       const isAtBottom = lastMsg?.id === oldMsgId;
 
+      logger.debug({ oldMsgId, lastMsgId: lastMsg?.id, isAtBottom }, "Status board position check");
+
       if (isAtBottom) {
         // Already at the bottom - just edit in place
-        const oldMsg = await channel.messages.fetch(oldMsgId);
         await discordQueue.add(async () => {
-          await oldMsg.edit({ embeds: [embed] });
+          await lastMsg!.edit({ embeds: [embed] });
         });
         needsReanchor = false;
         return;
       }
 
       // Not at the bottom - delete and re-send
+      logger.info({ oldMsgId, lastMsgId: lastMsg?.id }, "Re-anchoring status board to bottom");
       try {
         const oldMsg = await channel.messages.fetch(oldMsgId);
         await discordQueue.add(async () => { await oldMsg.delete(); });

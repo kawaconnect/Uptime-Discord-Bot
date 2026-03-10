@@ -110,6 +110,7 @@ class KumaClient extends EventEmitter {
   private _jwtToken: string | null = null;
   private _info: { version?: string; serverTimezone?: string } = {};
   private _lastHeartbeatAt = 0;
+  private _statusUpdateTimer: ReturnType<typeof setTimeout> | null = null;
 
   get monitors(): Map<number, KumaMonitor> { return this._monitors; }
   get latestStatus(): Map<number, number> { return this._latestStatus; }
@@ -196,18 +197,20 @@ class KumaClient extends EventEmitter {
     });
 
     // Kuma v2 sends heartbeatList per-monitor: (monitorId, beats[], ...)
-    this.socket.on("heartbeatList", (monitorId: string, beats: KumaHeartbeat[], ...rest: unknown[]) => {
+    // Debounce the emit - all 20 monitors stream in rapidly on connect,
+    // so we wait until they stop arriving before updating presence/status.
+    this.socket.on("heartbeatList", (monitorId: string, beats: KumaHeartbeat[]) => {
       if (Array.isArray(beats) && beats.length > 0) {
         this._latestStatus.set(Number(monitorId), beats[beats.length - 1].status);
       }
-      this.emit("monitorListUpdated", this._monitors);
+      this.scheduleStatusUpdate();
     });
 
-    this.socket.on("importantHeartbeatList", (monitorId: string, beats: KumaHeartbeat[], ...rest: unknown[]) => {
+    this.socket.on("importantHeartbeatList", (monitorId: string, beats: KumaHeartbeat[]) => {
       if (Array.isArray(beats) && beats.length > 0) {
         this._latestStatus.set(Number(monitorId), beats[beats.length - 1].status);
       }
-      this.emit("monitorListUpdated", this._monitors);
+      this.scheduleStatusUpdate();
     });
 
     // Kuma v2 sends per-monitor: (monitorId, value, ...)
@@ -264,6 +267,14 @@ class KumaClient extends EventEmitter {
         logger.error({ msg: res.msg }, "Login failed - check KUMA_USERNAME and KUMA_PASSWORD");
       }
     });
+  }
+
+  private scheduleStatusUpdate(): void {
+    if (this._statusUpdateTimer) clearTimeout(this._statusUpdateTimer);
+    this._statusUpdateTimer = setTimeout(() => {
+      this._statusUpdateTimer = null;
+      this.emit("monitorListUpdated", this._monitors);
+    }, 2_000); // Wait 2s for all per-monitor events to arrive
   }
 
   disconnect(): void {
