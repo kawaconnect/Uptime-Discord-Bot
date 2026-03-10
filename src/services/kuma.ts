@@ -281,6 +281,11 @@ class KumaClient extends EventEmitter {
       const prevStatus = this._latestStatus.get(monId);
       this._latestStatus.set(monId, hb.status);
 
+      // Update ping from every heartbeat so the board always shows fresh values
+      if (hb.ping !== null && hb.ping !== undefined) {
+        this._avgPing.set(monId, hb.ping);
+      }
+
       const monitor = this._monitors.get(monId);
       const name = monitor?.name ?? `?${monId}`;
 
