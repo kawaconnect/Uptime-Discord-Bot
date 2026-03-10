@@ -88,27 +88,32 @@ export async function updateStatusBoard(client: Client): Promise<void> {
   const embed = buildStatusEmbed();
   const oldMsgId = getSetting(STATUS_MSG_KEY);
 
-  // If we have an existing message and don't need to re-anchor, just edit
-  if (oldMsgId && !needsReanchor) {
-    try {
-      const oldMsg = await channel.messages.fetch(oldMsgId);
-      await discordQueue.add(async () => {
-        await oldMsg.edit({ embeds: [embed] });
-      });
-      return;
-    } catch {
-      // Message gone - fall through to create new one
-      logger.info("Status board message missing, creating new one");
-    }
-  }
-
-  // Need to re-anchor: delete old message and send a new one at the bottom
+  // Check if our message is already the last in the channel
   if (oldMsgId) {
     try {
-      const oldMsg = await channel.messages.fetch(oldMsgId);
-      await discordQueue.add(async () => { await oldMsg.delete(); });
+      const lastMessages = await channel.messages.fetch({ limit: 1 });
+      const lastMsg = lastMessages.first();
+      const isAtBottom = lastMsg?.id === oldMsgId;
+
+      if (isAtBottom) {
+        // Already at the bottom - just edit in place
+        const oldMsg = await channel.messages.fetch(oldMsgId);
+        await discordQueue.add(async () => {
+          await oldMsg.edit({ embeds: [embed] });
+        });
+        needsReanchor = false;
+        return;
+      }
+
+      // Not at the bottom - delete and re-send
+      try {
+        const oldMsg = await channel.messages.fetch(oldMsgId);
+        await discordQueue.add(async () => { await oldMsg.delete(); });
+      } catch {
+        // Already deleted
+      }
     } catch {
-      // Already deleted
+      logger.info("Status board message missing, creating new one");
     }
   }
 
