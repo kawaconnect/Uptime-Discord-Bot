@@ -5,6 +5,10 @@
  * The message always stays at the bottom of the channel:
  *  - If the bot's message is already the last message, edit it in place.
  *  - If someone posts below it, delete the old one and re-send (silent).
+ *
+ * Safety net: A periodic refresh timer (every 60s) updates the board even
+ * if Kuma stops sending events.  This guarantees the board is never more
+ * than ~60s stale.
  */
 
 import {
@@ -22,7 +26,11 @@ import { discordQueue } from "../queue/index.js";
 const STATUS_CHANNEL_KEY = "STATUS_CHANNEL_ID";
 const STATUS_MSG_KEY = "STATUS_MESSAGE_ID";
 
+/** How often (ms) to force-refresh the board regardless of events. */
+const REFRESH_INTERVAL_MS = 60_000; // 60 seconds
+
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let pendingUpdate = false;
 let needsReanchor = false;
 
@@ -46,6 +54,18 @@ export function startStatusBoard(client: Client): void {
     );
   });
 
+  // When Kuma reconnects (after watchdog or network issue), force an
+  // immediate board update once fresh data arrives.
+  kuma.on("connected", () => {
+    logger.info("Kuma reconnected - scheduling immediate status board update");
+    // Small delay to let monitorList/heartbeatList data arrive first
+    setTimeout(() => {
+      updateStatusBoard(client).catch((err) =>
+        logger.warn({ err }, "Failed to update status board after reconnect")
+      );
+    }, 5_000);
+  });
+
   // Watch for new messages in the status channel - if someone posts below
   // the status message, flag it for re-anchoring on the next update.
   client.on(Events.MessageCreate, (msg) => {
@@ -55,6 +75,21 @@ export function startStatusBoard(client: Client): void {
     needsReanchor = true;
     scheduleUpdate(client);
   });
+
+  // Periodic refresh - guarantees the board is never more than 60s stale
+  // even if Kuma completely stops sending events.
+  refreshTimer = setInterval(() => {
+    updateStatusBoard(client).catch((err) =>
+      logger.warn({ err }, "Failed periodic status board refresh")
+    );
+  }, REFRESH_INTERVAL_MS);
+
+  logger.info({ refreshIntervalMs: REFRESH_INTERVAL_MS }, "Status board periodic refresh started");
+}
+
+export function stopStatusBoard(): void {
+  if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
+  if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
 }
 
 function scheduleUpdate(client: Client): void {
@@ -74,8 +109,11 @@ export async function updateStatusBoard(client: Client): Promise<void> {
   const channelId = getSetting(STATUS_CHANNEL_KEY);
   if (!channelId) return;
 
-  if (!kuma.connected) {
-    logger.debug("Skipping status board update - not connected to Kuma");
+  // Don't skip when kuma.connected is false - if the watchdog just triggered
+  // a reconnect, we still want to show the stale warning on the board.
+  // Only skip if we have zero monitors (never connected at all).
+  if (kuma.monitors.size === 0 && !kuma.connected) {
+    logger.debug("Skipping status board update - no data and not connected");
     return;
   }
 
@@ -189,6 +227,10 @@ function buildStatusEmbed(): EmbedBuilder {
   else if (summary.pending > 0) color = 0xf39c12; // yellow
   else if (summary.maintenance > 0) color = 0x3498db; // blue
 
+  // If data is stale, override to orange warning
+  const stale = kuma.dataStale;
+  if (stale) color = 0xff6600; // orange - stale data warning
+
   const headerParts: string[] = [
     `${statusEmoji(MonitorStatus.UP)} **${summary.up}** up`,
   ];
@@ -213,11 +255,21 @@ function buildStatusEmbed(): EmbedBuilder {
     botTimeStr ? `Bot time: **${botTimeStr}** (${tz})` : "",
   ].filter(Boolean).join("\n");
 
+  // Stale data warning
+  let staleWarning = "";
+  if (stale) {
+    const staleSecs = kuma.dataStalenessSeconds;
+    const staleStr = staleSecs > 120
+      ? `${Math.floor(staleSecs / 60)}m ${staleSecs % 60}s`
+      : `${staleSecs}s`;
+    staleWarning = `\n\n\u26A0\uFE0F **Data may be stale** - no update from Kuma in ${staleStr}. Reconnecting...`;
+  }
+
   return new EmbedBuilder()
     .setTitle(`Service Status (${summary.up}/${summary.total - summary.paused})`)
-    .setDescription(`${headerParts.join("  |  ")}\n${description}${timeLines}`)
+    .setDescription(`${headerParts.join("  |  ")}\n${description}${timeLines}${staleWarning}`)
     .setColor(color)
-    .setFooter({ text: "Auto-updates on every heartbeat" });
+    .setFooter({ text: stale ? "Data may be stale - reconnecting to Kuma" : "Auto-updates every 60s" });
 }
 
 function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, number>): string {
