@@ -135,7 +135,13 @@ class KumaClient extends EventEmitter {
     this.socket.on("connect", () => {
       logger.info("Socket.IO connected");
       this._connected = true;
-      this.authenticate();
+      // If credentials are configured, authenticate. Otherwise wait for autoLogin.
+      const config = env();
+      if (config.KUMA_USERNAME && config.KUMA_PASSWORD) {
+        this.authenticate();
+      } else {
+        logger.info("No credentials configured - waiting for auto-login");
+      }
     });
 
     this.socket.on("disconnect", (reason) => {
@@ -162,6 +168,12 @@ class KumaClient extends EventEmitter {
     // ---- Data events (pushed automatically after login) ----
 
     this.socket.on("monitorList", (data: Record<string, KumaMonitor>) => {
+      // If we receive data, we're authenticated (even without explicit autoLogin)
+      if (!this._authenticated) {
+        logger.info("Received data - implicitly authenticated");
+        this._authenticated = true;
+        this.emit("connected");
+      }
       for (const [idStr, monitor] of Object.entries(data)) {
         this._monitors.set(Number(idStr), monitor);
       }

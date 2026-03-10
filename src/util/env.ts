@@ -12,12 +12,12 @@ const envSchema = z.object({
   PORT: z.coerce.number().default(3100),
   LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
 
-  // Uptime Kuma - Socket.IO requires username/password auth.
-  // API keys (uk1_xxx format) only work with Kuma's REST /api endpoints,
-  // NOT with the Socket.IO real-time API that this bot uses.
+  // Uptime Kuma - connect via internal cluster URL to bypass auth proxy.
+  // Username/password are optional - if Kuma has auth disabled (e.g. behind
+  // Authentik), the bot auto-logs in without credentials.
   KUMA_URL: z.string().min(1),
-  KUMA_USERNAME: z.string().min(1),
-  KUMA_PASSWORD: z.string().min(1),
+  KUMA_USERNAME: z.string().optional(),
+  KUMA_PASSWORD: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
