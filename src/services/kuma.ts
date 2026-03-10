@@ -38,14 +38,25 @@ export interface KumaMonitor {
 }
 
 export interface KumaHeartbeat {
-  id: number;
-  monitor_id: number;
+  /** Kuma v2 uses monitorID (camelCase). v1 used monitor_id. */
+  monitorID: number;
+  /** @deprecated v1 field - use monitorID */
+  monitor_id?: number;
   status: number;
   time: string;
   msg: string;
   ping: number | null;
   important: boolean;
-  duration: number;
+  retries?: number;
+  /** @deprecated v1 field */
+  id?: number;
+  /** @deprecated v1 field */
+  duration?: number;
+}
+
+/** Get the monitor ID from a heartbeat, handling both v1 and v2 field names. */
+export function heartbeatMonitorId(hb: KumaHeartbeat): number {
+  return Number(hb.monitorID ?? hb.monitor_id ?? 0);
 }
 
 export const MonitorStatus = {
@@ -254,19 +265,13 @@ class KumaClient extends EventEmitter {
       this._lastHeartbeatAt = Date.now();
       this._eventCounts.heartbeat++;
 
-      // Kuma v2 may use monitorID instead of monitor_id
-      const raw = hb as unknown as Record<string, unknown>;
-      const monId = Number(raw.monitorID ?? raw.monitor_id ?? 0);
+      const monId = heartbeatMonitorId(hb);
       const prevStatus = this._latestStatus.get(monId);
       this._latestStatus.set(monId, hb.status);
 
       const monitor = this._monitors.get(monId);
       const name = monitor?.name ?? `?${monId}`;
 
-      // Log heartbeat with raw keys on first occurrence to debug field names
-      if (this._eventCounts.heartbeat <= 3) {
-        logger.info({ rawKeys: Object.keys(hb), raw: hb }, "heartbeat RAW (first 3)");
-      }
       logger.info(
         { id: monId, name, status: statusLabel(hb.status), prev: prevStatus !== undefined ? statusLabel(prevStatus) : "none", ping: hb.ping },
         "heartbeat"
