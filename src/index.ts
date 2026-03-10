@@ -1,0 +1,124 @@
+import "dotenv/config";
+import { join } from "node:path";
+import { REST, Routes } from "discord.js";
+import { loadEnv, env } from "./util/env.js";
+import { logger } from "./util/logger.js";
+import { initDb, closeDb } from "./db/index.js";
+import { createClient } from "./client.js";
+import { startWebServer } from "./web/server.js";
+import { kuma } from "./services/kuma.js";
+import { startStatusBoard, updateStatusBoard } from "./services/statusBoard.js";
+import { startAlerts } from "./services/alerts.js";
+import { startPresence } from "./services/presence.js";
+import { setupCommand } from "./commands/setup.js";
+import { helpCommand } from "./commands/help.js";
+import { statusCommand, monitorsCommand, monitorCommand } from "./commands/status.js";
+
+let server: Awaited<ReturnType<typeof startWebServer>> | null = null;
+
+async function deployCommands() {
+  const config = env();
+  const commands = [
+    setupCommand.toJSON(),
+    helpCommand.toJSON(),
+    statusCommand.toJSON(),
+    monitorsCommand.toJSON(),
+    monitorCommand.toJSON(),
+  ];
+
+  const rest = new REST().setToken(config.DISCORD_TOKEN);
+
+  try {
+    if (config.DISCORD_GUILD_ID) {
+      await rest.put(
+        Routes.applicationGuildCommands(config.DISCORD_CLIENT_ID, config.DISCORD_GUILD_ID),
+        { body: commands }
+      );
+      logger.info({ guildId: config.DISCORD_GUILD_ID, count: commands.length }, "Slash commands deployed to guild");
+    } else {
+      await rest.put(
+        Routes.applicationCommands(config.DISCORD_CLIENT_ID),
+        { body: commands }
+      );
+      logger.info({ count: commands.length }, "Slash commands deployed globally");
+    }
+  } catch (err) {
+    logger.error({ err }, "Failed to deploy slash commands");
+  }
+}
+
+async function main() {
+  // 1. Validate environment
+  loadEnv();
+  logger.info("Environment validated");
+
+  // 2. Initialize SQLite
+  const dbPath = join(process.cwd(), "data", "bot.db");
+  initDb(dbPath);
+
+  // 3. Create Discord client and login
+  const client = createClient();
+  await client.login(env().DISCORD_TOKEN);
+
+  // 4. Deploy slash commands
+  await deployCommands();
+
+  // 5. Start health check HTTP server
+  server = await startWebServer();
+
+  // 6. Connect to Uptime Kuma
+  kuma.connect();
+
+  // 7. Wait for initial connection before starting services
+  kuma.once("connected", () => {
+    logger.info("Uptime Kuma connected - starting services");
+
+    // 8. Start auto-updating status board
+    startStatusBoard(client);
+
+    // 9. Start alert system
+    startAlerts(client);
+
+    // 10. Start bot presence updates
+    startPresence(client);
+
+    // Post initial status board after a brief delay (let monitors populate)
+    setTimeout(() => {
+      updateStatusBoard(client).catch((err) =>
+        logger.warn({ err }, "Failed initial status board update")
+      );
+    }, 5_000);
+  });
+
+  logger.info("Bot fully started - waiting for Uptime Kuma connection");
+}
+
+// ---------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------
+
+async function shutdown(signal: string) {
+  logger.info({ signal }, "Shutting down");
+
+  kuma.disconnect();
+
+  if (server) {
+    try { await server.close(); } catch { /* ignore */ }
+  }
+
+  closeDb();
+  logger.flush();
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("unhandledRejection", (err) => {
+  logger.fatal({ err }, "Unhandled rejection");
+  process.exit(1);
+});
+
+main().catch((err) => {
+  logger.fatal({ err }, "Fatal startup error");
+  process.exit(1);
+});
