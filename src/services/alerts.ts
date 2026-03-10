@@ -1,6 +1,8 @@
 /**
  * Alert system - @everyone alerts for:
  * - Connection to Uptime Kuma lost (30s grace period)
+ * - Data stale (watchdog detected silent failure - immediate @everyone)
+ * - Data recovered after stale period
  * - Monitor goes DOWN
  * - Monitor recovers (UP after DOWN)
  *
@@ -28,7 +30,7 @@ function isEnabled(type: string): boolean {
 }
 
 export function startAlerts(client: Client): void {
-  // ---- Connection loss ----
+  // ---- Connection loss (socket-level disconnect) ----
   kuma.on("disconnected", (reason) => {
     if (disconnectTimer) clearTimeout(disconnectTimer);
     disconnectTimer = setTimeout(() => {
@@ -52,6 +54,24 @@ export function startAlerts(client: Client): void {
         logger.error({ err }, "Failed to send reconnected alert")
       );
     }
+  });
+
+  // ---- Data staleness (silent failure - the most dangerous kind) ----
+  // This fires when the watchdog detects >2min without ANY data event.
+  // The socket is still "connected" but Kuma stopped sending updates.
+  // This is IMMEDIATE @everyone - no grace period, it's already been 2+ min.
+  kuma.on("dataStale", (stalenessMs: number) => {
+    if (!isEnabled("disconnect")) return;
+    sendStaleAlert(client, stalenessMs).catch((err) =>
+      logger.error({ err }, "Failed to send stale data alert")
+    );
+  });
+
+  // Data recovered after a stale period
+  kuma.on("dataFresh", () => {
+    sendStaleRecoveredAlert(client).catch((err) =>
+      logger.error({ err }, "Failed to send stale recovery alert")
+    );
   });
 
   // ---- Monitor status changes ----
@@ -121,6 +141,54 @@ async function sendReconnectedAlert(client: Client): Promise<void> {
     await channel.send({ embeds: [embed] });
   });
   logger.info("Sent reconnected alert");
+}
+
+async function sendStaleAlert(client: Client, stalenessMs: number): Promise<void> {
+  const channel = await getAlertChannel(client);
+  if (!channel) return;
+
+  const staleMin = Math.floor(stalenessMs / 60_000);
+  const staleSec = Math.floor((stalenessMs % 60_000) / 1000);
+  const staleStr = staleMin > 0 ? `${staleMin}m ${staleSec}s` : `${staleSec}s`;
+
+  const embed = new EmbedBuilder()
+    .setTitle("\u{1F6A8} MONITORING DEGRADED - DATA STALE")
+    .setDescription(
+      `Uptime Kuma socket is connected but **stopped sending data** for **${staleStr}**.\n\n` +
+      `**Impact:** Monitor statuses shown may be outdated. Outages may go undetected.\n` +
+      `**Action:** Bot is forcing a full reconnect to restore data flow.\n` +
+      `**Reconnect count:** ${kuma.reconnectCount}\n\n` +
+      `If this keeps happening, check Uptime Kuma server health.`
+    )
+    .setColor(0xff6600) // orange
+    .setTimestamp(new Date());
+
+  await discordQueue.add(async () => {
+    await channel.send({ content: "@everyone", embeds: [embed] });
+  });
+  logger.warn({ stalenessMs, reconnectCount: kuma.reconnectCount }, "Sent stale data alert");
+}
+
+async function sendStaleRecoveredAlert(client: Client): Promise<void> {
+  const channel = await getAlertChannel(client);
+  if (!channel) return;
+
+  const summary = kuma.getSummary();
+  const embed = new EmbedBuilder()
+    .setTitle("\u{1F7E2} Monitoring Restored - Fresh Data")
+    .setDescription(
+      `Data flow from Uptime Kuma has been restored after a stale period.\n\n` +
+      `**Status:** ${summary.up}/${summary.active} services up` +
+      (summary.down > 0 ? `\n**\u{1F534} ${summary.down} service${summary.down > 1 ? "s" : ""} currently down**` : "") +
+      `\n**Reconnect count:** ${kuma.reconnectCount}`
+    )
+    .setColor(summary.down > 0 ? 0xe74c3c : 0x2ecc71)
+    .setTimestamp(new Date());
+
+  await discordQueue.add(async () => {
+    await channel.send({ embeds: [embed] });
+  });
+  logger.info("Sent stale data recovery alert");
 }
 
 async function sendDownAlert(client: Client, monitor: KumaMonitor, heartbeat: KumaHeartbeat): Promise<void> {

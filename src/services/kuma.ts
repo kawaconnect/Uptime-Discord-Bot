@@ -97,6 +97,10 @@ export interface KumaClientEvents {
   monitorListUpdated: [monitors: Map<number, KumaMonitor>];
   statusChange: [monitor: KumaMonitor, heartbeat: KumaHeartbeat, previousStatus: number | undefined];
   heartbeat: [heartbeat: KumaHeartbeat];
+  /** Fired when the watchdog detects no data for >2 min (before reconnect). */
+  dataStale: [stalenessMs: number];
+  /** Fired when fresh data arrives after a stale period. */
+  dataFresh: [];
 }
 
 // ---------------------------------------------------------------
@@ -126,6 +130,7 @@ class KumaClient extends EventEmitter {
   private _statusUpdateTimer: ReturnType<typeof setTimeout> | null = null;
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private _reconnectCount = 0;
+  private _wasStale = false;
 
   get monitors(): Map<number, KumaMonitor> { return this._monitors; }
   get latestStatus(): Map<number, number> { return this._latestStatus; }
@@ -151,6 +156,11 @@ class KumaClient extends EventEmitter {
 
   private touchData(): void {
     this._lastDataAt = Date.now();
+    if (this._wasStale) {
+      this._wasStale = false;
+      logger.info("Data flowing again after stale period");
+      this.emit("dataFresh");
+    }
   }
 
   connect(): void {
@@ -292,6 +302,10 @@ class KumaClient extends EventEmitter {
           "WATCHDOG: No data from Kuma in >2 min - forcing full reconnect"
         );
         warnedAt = 0;
+        if (!this._wasStale) {
+          this._wasStale = true;
+          this.emit("dataStale", staleness);
+        }
         this.forceReconnect();
       } else if (staleness > DATA_WARN_MS && warnedAt < this._lastDataAt) {
         warnedAt = Date.now();
