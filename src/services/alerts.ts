@@ -57,9 +57,9 @@ export function startAlerts(client: Client): void {
   });
 
   // ---- Data staleness (silent failure - the most dangerous kind) ----
-  // This fires when the watchdog detects >2min without ANY data event.
-  // The socket is still "connected" but Kuma stopped sending updates.
-  // This is IMMEDIATE @everyone - no grace period, it's already been 2+ min.
+  // This fires when the watchdog detects >90s without heartbeat events.
+  // The socket is still "connected" but Kuma stopped sending heartbeats.
+  // This is IMMEDIATE @everyone - no grace period, it's already been 90+ sec.
   kuma.on("dataStale", (stalenessMs: number) => {
     if (!isEnabled("disconnect")) return;
     sendStaleAlert(client, stalenessMs).catch((err) =>
