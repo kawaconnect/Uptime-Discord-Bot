@@ -103,7 +103,17 @@ async function doUpdateStatusBoard(client: Client): Promise<void> {
     return;
   }
 
-  const channel = await client.channels.fetch(channelId) as TextChannel | null;
+  let channel: TextChannel | null;
+  try {
+    channel = await client.channels.fetch(channelId) as TextChannel | null;
+  } catch (err: any) {
+    const status = err?.status ?? err?.httpStatus ?? 0;
+    if (status >= 500 || status === 0) {
+      logger.warn({ err, channelId, status }, "Status board channel fetch failed (transient) - skipping cycle");
+      return;
+    }
+    throw err;
+  }
   if (!channel?.isTextBased()) {
     logger.warn({ channelId }, "Status board channel not found");
     return;
@@ -140,8 +150,15 @@ async function doUpdateStatusBoard(client: Client): Promise<void> {
       } catch {
         // Already deleted
       }
-    } catch {
-      logger.info("Status board message missing, creating new one");
+    } catch (err: any) {
+      // Transient errors (503, 500, network) - do NOT fall through to create a new message.
+      // Only treat 404/403 as "message gone".
+      const status = err?.status ?? err?.httpStatus ?? 0;
+      if (status >= 500 || status === 0) {
+        logger.warn({ err, status, oldMsgId }, "Status board update failed (transient) - skipping to avoid duplicates");
+        return;
+      }
+      logger.info({ status }, "Status board message missing, creating new one");
     }
   }
 
