@@ -118,6 +118,8 @@ export interface KumaClientEvents {
 const HEARTBEAT_TIMEOUT_MS = 90_000; // 90 seconds
 /** Watchdog check interval. */
 const WATCHDOG_INTERVAL_MS = 15_000; // 15 seconds
+/** Periodic reconnect to refresh monitor list (Kuma only pushes it on connect). */
+const MONITOR_REFRESH_INTERVAL_MS = 5 * 60_000; // 5 minutes
 
 // ---------------------------------------------------------------
 // Client
@@ -145,6 +147,7 @@ class KumaClient extends EventEmitter {
 
   private _statusUpdateTimer: ReturnType<typeof setTimeout> | null = null;
   private _watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private _refreshTimer: ReturnType<typeof setInterval> | null = null;
   private _reconnectCount = 0;
   private _wasStale = false;
   /** Guard against emitting 'connected' multiple times per connection cycle. */
@@ -392,6 +395,7 @@ class KumaClient extends EventEmitter {
     });
 
     this.startWatchdog();
+    this.startMonitorRefresh();
   }
 
   // ---------------------------------------------------------------
@@ -444,6 +448,30 @@ class KumaClient extends EventEmitter {
     if (this._watchdogTimer) {
       clearInterval(this._watchdogTimer);
       this._watchdogTimer = null;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Periodic monitor refresh - Kuma only pushes monitorList on
+  // connect, so reconnect periodically to pick up renames/adds/deletes.
+  // ---------------------------------------------------------------
+
+  private startMonitorRefresh(): void {
+    this.stopMonitorRefresh();
+
+    this._refreshTimer = setInterval(() => {
+      if (!this._authenticated) return;
+      logger.info("Periodic monitor refresh - reconnecting to get fresh monitorList");
+      this.forceReconnect();
+    }, MONITOR_REFRESH_INTERVAL_MS);
+
+    logger.info({ intervalMs: MONITOR_REFRESH_INTERVAL_MS }, "Monitor refresh timer started");
+  }
+
+  private stopMonitorRefresh(): void {
+    if (this._refreshTimer) {
+      clearInterval(this._refreshTimer);
+      this._refreshTimer = null;
     }
   }
 
@@ -533,6 +561,7 @@ class KumaClient extends EventEmitter {
 
   disconnect(): void {
     this.stopWatchdog();
+    this.stopMonitorRefresh();
     if (this.socket) {
       this.socket.disconnect();
       this.socket = null;
