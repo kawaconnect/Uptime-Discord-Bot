@@ -269,10 +269,29 @@ class KumaClient extends EventEmitter {
         this.emitConnectedOnce();
       }
       const count = Object.keys(data).length;
-      logger.info({ monitors: count }, "monitorList received");
+      const prevCount = this._monitors.size;
+
+      // Build new set of IDs from Kuma's authoritative list
+      const freshIds = new Set<number>();
       for (const [idStr, monitor] of Object.entries(data)) {
-        this._monitors.set(Number(idStr), monitor);
+        const id = Number(idStr);
+        freshIds.add(id);
+        this._monitors.set(id, monitor);
       }
+
+      // Remove monitors that no longer exist in Kuma
+      for (const id of this._monitors.keys()) {
+        if (!freshIds.has(id)) {
+          this._monitors.delete(id);
+          this._latestStatus.delete(id);
+          this._avgPing.delete(id);
+          this._latestPing.delete(id);
+          this._uptime24h.delete(id);
+        }
+      }
+
+      const removed = prevCount - this._monitors.size + (count - prevCount);
+      logger.info({ monitors: count, previous: prevCount, removed: removed > 0 ? removed : 0 }, "monitorList received");
       this.emit("monitorListUpdated", this._monitors);
     });
 
