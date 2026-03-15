@@ -1,11 +1,14 @@
 /**
- * Bot presence - shows "Watching X/Y services up" in the Discord member list.
- * Updates on every heartbeat (debounced), and reflects degraded/stale states.
+ * Bot presence - shows combined Kuma + SiteGuard status in the Discord member list.
+ * e.g. "Watching 25/28 services up" or "3 DOWN | 25/28 up"
+ *
+ * Updates on heartbeats (debounced) and SiteGuard data updates.
  */
 
 import { ActivityType, Client } from "discord.js";
 import { logger } from "../util/logger.js";
-import { kuma, MonitorStatus } from "./kuma.js";
+import { kuma } from "./kuma.js";
+import { siteguard } from "./siteguard.js";
 
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -14,13 +17,9 @@ export function startPresence(client: Client): void {
   // Set initial presence
   updatePresence(client);
 
-  // Update on heartbeats (debounced)
+  // Update on Kuma heartbeats (debounced)
   kuma.on("heartbeat", () => {
-    if (updateTimer) return;
-    updateTimer = setTimeout(() => {
-      updateTimer = null;
-      updatePresence(client);
-    }, 5_000);
+    scheduleUpdate(client);
   });
 
   kuma.on("monitorListUpdated", () => {
@@ -29,13 +28,7 @@ export function startPresence(client: Client): void {
 
   // Show disconnected state
   kuma.on("disconnected", () => {
-    client.user?.setPresence({
-      status: "dnd",
-      activities: [{
-        name: "DISCONNECTED from Uptime Kuma",
-        type: ActivityType.Watching,
-      }],
-    });
+    updatePresence(client);
   });
 
   kuma.on("connected", () => {
@@ -44,13 +37,7 @@ export function startPresence(client: Client): void {
 
   // Show stale data state immediately
   kuma.on("dataStale", () => {
-    client.user?.setPresence({
-      status: "dnd",
-      activities: [{
-        name: "DATA STALE - reconnecting to Kuma",
-        type: ActivityType.Watching,
-      }],
-    });
+    updatePresence(client);
   });
 
   // Restore presence when data recovers
@@ -58,8 +45,20 @@ export function startPresence(client: Client): void {
     updatePresence(client);
   });
 
-  // Periodic presence refresh every 60s - ensures presence reflects
-  // stale state even if no events are firing
+  // SiteGuard updates trigger presence refresh too
+  siteguard.on("updated", () => {
+    scheduleUpdate(client);
+  });
+
+  siteguard.on("unreachable", () => {
+    updatePresence(client);
+  });
+
+  siteguard.on("reachable", () => {
+    updatePresence(client);
+  });
+
+  // Periodic presence refresh every 60s
   refreshTimer = setInterval(() => {
     updatePresence(client);
   }, 60_000);
@@ -70,8 +69,16 @@ export function stopPresence(): void {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
 }
 
+function scheduleUpdate(client: Client): void {
+  if (updateTimer) return;
+  updateTimer = setTimeout(() => {
+    updateTimer = null;
+    updatePresence(client);
+  }, 5_000);
+}
+
 function updatePresence(client: Client): void {
-  // If data is stale, show degraded state
+  // If Kuma data is stale, show degraded state
   if (kuma.dataStale) {
     const staleSec = kuma.dataStalenessSeconds;
     const staleStr = staleSec > 120
@@ -88,18 +95,42 @@ function updatePresence(client: Client): void {
     return;
   }
 
-  if (!kuma.connected) return;
+  // Combine Kuma + SiteGuard summaries
+  const kumaSummary = kuma.connected ? kuma.getSummary() : null;
+  const sgSummary = siteguard.data ? siteguard.getSummary() : null;
 
-  const summary = kuma.getSummary();
-  const active = summary.total - summary.paused;
+  // If neither is available
+  if (!kumaSummary && !sgSummary) {
+    if (!kuma.connected) {
+      client.user?.setPresence({
+        status: "dnd",
+        activities: [{
+          name: "DISCONNECTED from Uptime Kuma",
+          type: ActivityType.Watching,
+        }],
+      });
+    }
+    return;
+  }
+
+  const kumaUp = kumaSummary?.up ?? 0;
+  const kumaActive = kumaSummary ? kumaSummary.total - kumaSummary.paused : 0;
+  const kumaDown = kumaSummary?.down ?? 0;
+  const sgUp = sgSummary?.operational ?? 0;
+  const sgActive = sgSummary?.total ?? 0;
+  const sgDown = sgSummary?.down ?? 0;
+
+  const totalUp = kumaUp + sgUp;
+  const totalActive = kumaActive + sgActive;
+  const totalDown = kumaDown + sgDown;
 
   let status: "online" | "idle" | "dnd" = "online";
-  if (summary.down > 0) status = "dnd";
-  else if (summary.pending > 0) status = "idle";
+  if (totalDown > 0 || (!siteguard.reachable && siteguard.isConfigured)) status = "dnd";
+  else if ((kumaSummary?.pending ?? 0) > 0 || (sgSummary?.degraded ?? 0) > 0) status = "idle";
 
-  const text = summary.down > 0
-    ? `${summary.down} DOWN | ${summary.up}/${active} up`
-    : `${summary.up}/${active} services up`;
+  const text = totalDown > 0
+    ? `${totalDown} DOWN | ${totalUp}/${totalActive} up`
+    : `${totalUp}/${totalActive} services up`;
 
   try {
     client.user?.setPresence({

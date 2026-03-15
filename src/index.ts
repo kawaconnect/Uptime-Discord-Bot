@@ -7,9 +7,10 @@ import { initDb, closeDb } from "./db/index.js";
 import { createClient } from "./client.js";
 import { startWebServer } from "./web/server.js";
 import { kuma } from "./services/kuma.js";
-import { startStatusBoard, updateStatusBoard } from "./services/statusBoard.js";
+import { startStatusBoard, stopStatusBoard, updateStatusBoard } from "./services/statusBoard.js";
 import { startAlerts } from "./services/alerts.js";
-import { startPresence } from "./services/presence.js";
+import { startPresence, stopPresence } from "./services/presence.js";
+import { configureSmtp } from "./services/email.js";
 import { setupCommand } from "./commands/setup.js";
 import { helpCommand } from "./commands/help.js";
 import {
@@ -22,7 +23,6 @@ import {
   refreshCommand,
 } from "./commands/status.js";
 import { siteguard } from "./services/siteguard.js";
-import { startSgStatusBoard, stopSgStatusBoard } from "./services/sgStatusBoard.js";
 import { startSgAlerts } from "./services/sgAlerts.js";
 import { sgSetupCommand } from "./commands/sg-setup.js";
 import {
@@ -86,6 +86,9 @@ async function main() {
   const dbPath = join(process.cwd(), "data", "bot.db");
   initDb(dbPath);
 
+  // Initialize SMTP from DB/env settings
+  configureSmtp();
+
   const client = createClient();
   await client.login(env().DISCORD_TOKEN);
 
@@ -119,7 +122,6 @@ async function main() {
     siteguard.start();
 
     siteguard.once("updated", () => {
-      startSgStatusBoard(client);
       startSgAlerts(client);
     });
   }
@@ -134,7 +136,8 @@ async function main() {
 async function shutdown(signal: string) {
   logger.info({ signal }, "Shutting down");
   siteguard.stop();
-  stopSgStatusBoard();
+  stopStatusBoard();
+  stopPresence();
   kuma.disconnect();
   if (server) { try { await server.close(); } catch { /* ignore */ } }
   closeDb();

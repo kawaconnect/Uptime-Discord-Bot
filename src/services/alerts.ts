@@ -1,12 +1,13 @@
 /**
- * Alert system - @everyone alerts for:
+ * Kuma alert system - Discord alerts + optional email for:
  * - Connection to Uptime Kuma lost (30s grace period)
- * - Data stale (watchdog detected silent failure - immediate @everyone)
+ * - Data stale (watchdog detected silent failure - immediate)
  * - Data recovered after stale period
  * - Monitor goes DOWN
  * - Monitor recovers (UP after DOWN)
  *
  * Each alert type can be toggled via /setup alerts-toggle.
+ * @everyone and email are independently configurable (default: both OFF for Kuma).
  */
 
 import {
@@ -18,6 +19,7 @@ import { logger } from "../util/logger.js";
 import { getSetting } from "../db/index.js";
 import { kuma, MonitorStatus, statusEmoji, type KumaMonitor, type KumaHeartbeat } from "./kuma.js";
 import { discordQueue } from "../queue/index.js";
+import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 
 const ALERT_CHANNEL_KEY = "ALERT_CHANNEL_ID";
 const DISCONNECT_GRACE_MS = 30_000;
@@ -27,6 +29,16 @@ let wasDisconnected = false;
 
 function isEnabled(type: string): boolean {
   return getSetting(`ALERT_${type.toUpperCase()}_ENABLED`) !== "false";
+}
+
+/** Whether @everyone mentions are enabled for Kuma alerts. Default: false. */
+function isMentionEnabled(): boolean {
+  return getSetting("KUMA_ALERT_MENTION_ENABLED") === "true";
+}
+
+/** Whether email alerts are enabled for Kuma alerts. Default: false. */
+function isEmailEnabled(): boolean {
+  return getSetting("KUMA_ALERT_EMAIL_ENABLED") === "true";
 }
 
 export function startAlerts(client: Client): void {
@@ -49,7 +61,6 @@ export function startAlerts(client: Client): void {
     }
     if (wasDisconnected) {
       wasDisconnected = false;
-      // Send reconnected notice
       sendReconnectedAlert(client).catch((err) =>
         logger.error({ err }, "Failed to send reconnected alert")
       );
@@ -57,9 +68,6 @@ export function startAlerts(client: Client): void {
   });
 
   // ---- Data staleness (silent failure - the most dangerous kind) ----
-  // This fires when the watchdog detects >90s without heartbeat events.
-  // The socket is still "connected" but Kuma stopped sending heartbeats.
-  // This is IMMEDIATE @everyone - no grace period, it's already been 90+ sec.
   kuma.on("dataStale", (stalenessMs: number) => {
     if (!isEnabled("disconnect")) return;
     sendStaleAlert(client, stalenessMs).catch((err) =>
@@ -67,7 +75,6 @@ export function startAlerts(client: Client): void {
     );
   });
 
-  // Data recovered after a stale period
   kuma.on("dataFresh", () => {
     sendStaleRecoveredAlert(client).catch((err) =>
       logger.error({ err }, "Failed to send stale recovery alert")
@@ -101,6 +108,20 @@ async function getAlertChannel(client: Client): Promise<TextChannel | null> {
   return null;
 }
 
+/** Get mention string based on config. */
+function mention(): string {
+  return isMentionEnabled() ? "@everyone" : "";
+}
+
+/** Send email if Kuma email alerts are enabled. */
+function maybeEmail(subject: string, html: string): void {
+  if (isEmailEnabled() && isSmtpConfigured()) {
+    sendAlertEmail(subject, html).catch((err) =>
+      logger.error({ err }, "Failed to send Kuma alert email")
+    );
+  }
+}
+
 async function sendDisconnectAlert(client: Client, reason: string): Promise<void> {
   const channel = await getAlertChannel(client);
   if (!channel) return;
@@ -116,10 +137,16 @@ async function sendDisconnectAlert(client: Client, reason: string): Promise<void
     .setColor(0xe74c3c)
     .setTimestamp(new Date());
 
+  const content = mention();
   await discordQueue.add(async () => {
-    await channel.send({ content: "@everyone", embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
   });
   logger.warn("Sent disconnect alert");
+
+  maybeEmail(
+    "[DISCONNECTED] Uptime Kuma",
+    `<h2>Uptime Kuma Disconnected</h2><p>Lost connection for over 30 seconds.</p><p><b>Reason:</b> ${reason}</p>`
+  );
 }
 
 async function sendReconnectedAlert(client: Client): Promise<void> {
@@ -141,6 +168,11 @@ async function sendReconnectedAlert(client: Client): Promise<void> {
     await channel.send({ embeds: [embed] });
   });
   logger.info("Sent reconnected alert");
+
+  maybeEmail(
+    "[RECONNECTED] Uptime Kuma",
+    `<h2>Uptime Kuma Reconnected</h2><p>Status: ${summary.up}/${summary.active} services up</p>`
+  );
 }
 
 async function sendStaleAlert(client: Client, stalenessMs: number): Promise<void> {
@@ -160,13 +192,19 @@ async function sendStaleAlert(client: Client, stalenessMs: number): Promise<void
       `**Reconnect count:** ${kuma.reconnectCount}\n\n` +
       `If this keeps happening, check Uptime Kuma server health.`
     )
-    .setColor(0xff6600) // orange
+    .setColor(0xff6600)
     .setTimestamp(new Date());
 
+  const content = mention();
   await discordQueue.add(async () => {
-    await channel.send({ content: "@everyone", embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
   });
   logger.warn({ stalenessMs, reconnectCount: kuma.reconnectCount }, "Sent stale data alert");
+
+  maybeEmail(
+    "[STALE DATA] Uptime Kuma",
+    `<h2>Monitoring Degraded - Data Stale</h2><p>No data for ${staleStr}. Reconnecting...</p>`
+  );
 }
 
 async function sendStaleRecoveredAlert(client: Client): Promise<void> {
@@ -189,6 +227,11 @@ async function sendStaleRecoveredAlert(client: Client): Promise<void> {
     await channel.send({ embeds: [embed] });
   });
   logger.info("Sent stale data recovery alert");
+
+  maybeEmail(
+    "[RESTORED] Uptime Kuma Data Flow",
+    `<h2>Monitoring Restored</h2><p>Status: ${summary.up}/${summary.active} services up</p>`
+  );
 }
 
 async function sendDownAlert(client: Client, monitor: KumaMonitor, heartbeat: KumaHeartbeat): Promise<void> {
@@ -207,10 +250,16 @@ async function sendDownAlert(client: Client, monitor: KumaMonitor, heartbeat: Ku
     .setColor(0xe74c3c)
     .setTimestamp(new Date(heartbeat.time));
 
+  const content = mention();
   await discordQueue.add(async () => {
-    await channel.send({ content: "@everyone", embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
   });
   logger.warn({ monitorId: monitor.id, name: monitor.name, msg: heartbeat.msg }, "Sent DOWN alert");
+
+  maybeEmail(
+    `[DOWN] ${monitor.name}`,
+    `<h2>${monitor.name} is DOWN</h2><p><b>Type:</b> ${monitor.type}</p><p><b>Target:</b> ${target}</p><p><b>Error:</b> ${heartbeat.msg || "No details"}</p>`
+  );
 }
 
 async function sendRecoveryAlert(client: Client, monitor: KumaMonitor, heartbeat: KumaHeartbeat): Promise<void> {
@@ -232,4 +281,9 @@ async function sendRecoveryAlert(client: Client, monitor: KumaMonitor, heartbeat
     await channel.send({ embeds: [embed] });
   });
   logger.info({ monitorId: monitor.id, name: monitor.name }, "Sent recovery alert");
+
+  maybeEmail(
+    `[RECOVERED] ${monitor.name}`,
+    `<h2>${monitor.name} is back UP</h2><p><b>Response:</b> ${heartbeat.msg || "OK"}${ping}</p>`
+  );
 }

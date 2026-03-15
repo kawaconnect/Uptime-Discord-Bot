@@ -9,7 +9,7 @@ import {
   EmbedBuilder,
 } from "discord.js";
 import { siteguard, sgStatusEmoji, sgStatusColor, SgStatus, type SgSite } from "../services/siteguard.js";
-import { updateSgStatusBoard } from "../services/sgStatusBoard.js";
+import { updateStatusBoard } from "../services/statusBoard.js";
 
 // ---------------------------------------------------------------
 // Command definitions
@@ -209,7 +209,7 @@ export async function handleSgRefreshCommand(
   await siteguard.poll();
 
   // Update the status board
-  await updateSgStatusBoard(interaction.client);
+  await updateStatusBoard(interaction.client);
 
   const summary = siteguard.getSummary();
   await interaction.editReply(

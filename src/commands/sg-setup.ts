@@ -13,7 +13,6 @@ import { logger } from "../util/logger.js";
 import { setSetting, deleteSetting, getSetting } from "../db/index.js";
 import { env } from "../util/env.js";
 import { siteguard } from "../services/siteguard.js";
-import { startSgStatusBoard } from "../services/sgStatusBoard.js";
 import { startSgAlerts } from "../services/sgAlerts.js";
 
 function isAdmin(userId: string): boolean {
@@ -25,14 +24,6 @@ export const sgSetupCommand = new SlashCommandBuilder()
   .setName("sg-setup")
   .setDescription("SiteGuard health monitor setup (admin only)")
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-  .addSubcommand((sc) =>
-    sc
-      .setName("status")
-      .setDescription("Set the SiteGuard status board channel")
-      .addChannelOption((o) =>
-        o.setName("channel").setDescription("Channel for the SG status board").addChannelTypes(ChannelType.GuildText).setRequired(true)
-      )
-  )
   .addSubcommand((sc) =>
     sc
       .setName("alerts")
@@ -48,10 +39,12 @@ export const sgSetupCommand = new SlashCommandBuilder()
       .addStringOption((o) =>
         o.setName("type").setDescription("Alert type").setRequired(true)
           .addChoices(
-            { name: "Site down (@everyone)", value: "site_down" },
+            { name: "Site down", value: "site_down" },
             { name: "Site recovery", value: "site_recovery" },
             { name: "SSL expiring", value: "ssl_expiring" },
-            { name: "WordPress unreachable (@everyone)", value: "wp_unreachable" },
+            { name: "WordPress unreachable", value: "wp_unreachable" },
+            { name: "@everyone mentions for SG alerts (default: on)", value: "sg_mention" },
+            { name: "Email alerts for SG (default: on)", value: "sg_email" },
           )
       )
       .addStringOption((o) =>
@@ -92,7 +85,6 @@ export async function handleSgSetupCommand(
 
   try {
     switch (sub) {
-      case "status": return await handleSgStatusSetup(interaction);
       case "alerts": return await handleSgAlertsSetup(interaction);
       case "alerts-toggle": return await handleSgAlertsToggle(interaction);
       case "show": return await handleSgShowSetup(interaction);
@@ -112,16 +104,6 @@ export async function handleSgSetupCommand(
   }
 }
 
-async function handleSgStatusSetup(interaction: ChatInputCommandInteraction) {
-  const channel = interaction.options.getChannel("channel", true);
-  setSetting("SG_STATUS_CHANNEL_ID", channel.id);
-  await interaction.reply({
-    content: `SiteGuard status board channel set to <#${channel.id}>. The health status embed will appear shortly.`,
-    ephemeral: true,
-  });
-  logger.info({ channelId: channel.id }, "SG status channel configured");
-}
-
 async function handleSgAlertsSetup(interaction: ChatInputCommandInteraction) {
   const channel = interaction.options.getChannel("channel", true);
   setSetting("SG_ALERT_CHANNEL_ID", channel.id);
@@ -135,20 +117,47 @@ async function handleSgAlertsSetup(interaction: ChatInputCommandInteraction) {
 async function handleSgAlertsToggle(interaction: ChatInputCommandInteraction) {
   const type = interaction.options.getString("type", true);
   const state = interaction.options.getString("state", true);
+
+  // @everyone mention toggle for SiteGuard (default: ON)
+  if (type === "sg_mention") {
+    if (state === "on") {
+      deleteSetting("SG_ALERT_MENTION_ENABLED"); // default is on
+      await interaction.reply({ content: "\u2705 @everyone mentions **enabled** for SiteGuard alerts (default).", ephemeral: true });
+    } else {
+      setSetting("SG_ALERT_MENTION_ENABLED", "false");
+      await interaction.reply({ content: "\u274C @everyone mentions **disabled** for SiteGuard alerts.", ephemeral: true });
+    }
+    logger.info({ type, state }, "SG mention toggle updated");
+    return;
+  }
+
+  // Email toggle for SiteGuard (default: ON)
+  if (type === "sg_email") {
+    if (state === "on") {
+      deleteSetting("SG_ALERT_EMAIL_ENABLED"); // default is on
+      await interaction.reply({ content: "\u2705 Email alerts **enabled** for SiteGuard alerts (default).", ephemeral: true });
+    } else {
+      setSetting("SG_ALERT_EMAIL_ENABLED", "false");
+      await interaction.reply({ content: "\u274C Email alerts **disabled** for SiteGuard alerts.", ephemeral: true });
+    }
+    logger.info({ type, state }, "SG email toggle updated");
+    return;
+  }
+
+  // Standard SiteGuard alert toggles (default: ON)
   const key = `SG_ALERT_${type.toUpperCase()}_ENABLED`;
 
   if (state === "on") {
     deleteSetting(key);
-    await interaction.reply({ content: `\u2705 SiteGuard **${type.replace("_", " ")}** alerts enabled.`, ephemeral: true });
+    await interaction.reply({ content: `\u2705 SiteGuard **${type.replace(/_/g, " ")}** alerts enabled.`, ephemeral: true });
   } else {
     setSetting(key, "false");
-    await interaction.reply({ content: `\u274C SiteGuard **${type.replace("_", " ")}** alerts disabled.`, ephemeral: true });
+    await interaction.reply({ content: `\u274C SiteGuard **${type.replace(/_/g, " ")}** alerts disabled.`, ephemeral: true });
   }
   logger.info({ type, state }, "SG alert toggle updated");
 }
 
 async function handleSgShowSetup(interaction: ChatInputCommandInteraction) {
-  const statusChannel = getSetting("SG_STATUS_CHANNEL_ID");
   const alertChannel = getSetting("SG_ALERT_CHANNEL_ID");
   const config = env();
 
@@ -156,6 +165,8 @@ async function handleSgShowSetup(interaction: ChatInputCommandInteraction) {
   const siteRecoveryEnabled = getSetting("SG_ALERT_SITE_RECOVERY_ENABLED") !== "false";
   const sslExpiringEnabled = getSetting("SG_ALERT_SSL_EXPIRING_ENABLED") !== "false";
   const wpUnreachableEnabled = getSetting("SG_ALERT_WP_UNREACHABLE_ENABLED") !== "false";
+  const mentionEnabled = getSetting("SG_ALERT_MENTION_ENABLED") !== "false";
+  const emailEnabled = getSetting("SG_ALERT_EMAIL_ENABLED") !== "false";
 
   const summary = siteguard.data ? siteguard.getSummary() : null;
 
@@ -168,14 +179,17 @@ async function handleSgShowSetup(interaction: ChatInputCommandInteraction) {
     siteguard.data ? `**SiteGuard Version:** ${siteguard.data.version}` : "",
     `**Poll Interval:** ${(config.SG_HEALTH_POLL_MS ?? 60000) / 1000}s`,
     "",
-    `**Status Board Channel:** ${statusChannel ? `<#${statusChannel}>` : "*not set - use `/sg-setup status`*"}`,
     `**Alert Channel:** ${alertChannel ? `<#${alertChannel}>` : "*not set - use `/sg-setup alerts`*"}`,
     "",
     "**Alert Types:**",
-    `  Site down: ${siteDownEnabled ? "\u2705 enabled (@everyone)" : "\u274C disabled"}`,
+    `  Site down: ${siteDownEnabled ? "\u2705 enabled" : "\u274C disabled"}`,
     `  Site recovery: ${siteRecoveryEnabled ? "\u2705 enabled" : "\u274C disabled"}`,
     `  SSL expiring: ${sslExpiringEnabled ? "\u2705 enabled" : "\u274C disabled"}`,
-    `  WP unreachable: ${wpUnreachableEnabled ? "\u2705 enabled (@everyone)" : "\u274C disabled"}`,
+    `  WP unreachable: ${wpUnreachableEnabled ? "\u2705 enabled" : "\u274C disabled"}`,
+    "",
+    "**Notification Channels:**",
+    `  @everyone mentions: ${mentionEnabled ? "\u2705 enabled (default)" : "\u274C disabled"}`,
+    `  Email alerts: ${emailEnabled ? "\u2705 enabled (default)" : "\u274C disabled"}`,
   ];
 
   await interaction.reply({ content: lines.filter(Boolean).join("\n"), ephemeral: true });
@@ -230,9 +244,8 @@ async function handleSgConnect(interaction: ChatInputCommandInteraction) {
       // Start or restart the monitor
       siteguard.restart();
 
-      // Start services if not already running (first-time connect via slash command)
+      // Start alert service if not already running (first-time connect via slash command)
       siteguard.once("updated", () => {
-        startSgStatusBoard(interaction.client);
         startSgAlerts(interaction.client);
       });
 
@@ -242,7 +255,7 @@ async function handleSgConnect(interaction: ChatInputCommandInteraction) {
         `**Version:** ${version}\n` +
         `**Sites detected:** ${siteCount}\n` +
         `**Overall status:** ${data.status?.toUpperCase() ?? "UNKNOWN"}\n\n` +
-        `Use \`/sg-setup status #channel\` to set up the status board, and \`/sg-setup alerts #channel\` for alerts.`
+        `Use \`/sg-setup alerts #channel\` for alerts. Status board is unified - use \`/setup status #channel\`.`
       );
     }
   } catch (err) {
@@ -254,7 +267,6 @@ async function handleSgConnect(interaction: ChatInputCommandInteraction) {
     // Still restart with saved config
     siteguard.restart();
     siteguard.once("updated", () => {
-      startSgStatusBoard(interaction.client);
       startSgAlerts(interaction.client);
     });
   }

@@ -3,6 +3,7 @@ import { env } from "../util/env.js";
 import { logger } from "../util/logger.js";
 import { kuma, statusLabel } from "../services/kuma.js";
 import { siteguard } from "../services/siteguard.js";
+import { getSmtpConfig } from "../services/email.js";
 
 export async function startWebServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
@@ -62,6 +63,20 @@ export async function startWebServer(): Promise<FastifyInstance> {
       summary: siteguard.getSummary(),
       sites: siteguard.sites,
       wpVersion: siteguard.data?.version ?? null,
+    };
+  });
+
+  app.get("/debug/smtp", async () => {
+    const config = getSmtpConfig();
+    if (!config) return { configured: false };
+    return {
+      configured: true,
+      host: config.host,
+      port: config.port,
+      secure: config.secure,
+      from: config.from,
+      to: config.to,
+      auth: !!config.user,
     };
   });
 

@@ -1,9 +1,9 @@
 /**
- * Status board - persistent message showing all monitor states.
- * Refreshes every 15 seconds. Period.
+ * Unified status board - persistent message showing both Uptime Kuma monitors
+ * AND SiteGuard WordPress site health in a single embed.
  *
- * If heartbeats are stale (>90s), forces a reconnect on every refresh
- * cycle until data flows again.
+ * Refreshes every 15 seconds. If heartbeats are stale (>90s), forces a
+ * reconnect on every refresh cycle until data flows again.
  */
 
 import {
@@ -16,6 +16,7 @@ import {
 import { logger } from "../util/logger.js";
 import { getSetting, setSetting } from "../db/index.js";
 import { kuma, MonitorStatus, statusEmoji, statusLabel, type KumaMonitor } from "./kuma.js";
+import { siteguard, sgStatusEmoji, SgStatus, type SgSite } from "./siteguard.js";
 import { discordQueue } from "../queue/index.js";
 
 const STATUS_CHANNEL_KEY = "STATUS_CHANNEL_ID";
@@ -46,6 +47,13 @@ export function startStatusBoard(client: Client): void {
         logger.warn({ err }, "Failed to update status board after reconnect")
       );
     }, 5_000);
+  });
+
+  // SiteGuard data updates trigger board refresh too
+  siteguard.on("updated", () => {
+    updateStatusBoard(client).catch((err) =>
+      logger.warn({ err }, "Failed to update status board on SiteGuard update")
+    );
   });
 
   // Watch for messages in status channel - flag for re-anchor
@@ -98,8 +106,8 @@ async function doUpdateStatusBoard(client: Client): Promise<void> {
   const channelId = getSetting(STATUS_CHANNEL_KEY);
   if (!channelId) return;
 
-  if (kuma.monitors.size === 0 && !kuma.connected) {
-    logger.info("Skipping board update - no data and not connected");
+  if (kuma.monitors.size === 0 && !kuma.connected && !siteguard.data) {
+    logger.info("Skipping board update - no data from either source");
     return;
   }
 
@@ -183,8 +191,11 @@ async function doUpdateStatusBoard(client: Client): Promise<void> {
 function buildStatusEmbed(): EmbedBuilder {
   const monitors = kuma.monitors;
   const latestStatus = kuma.latestStatus;
-  const summary = kuma.getSummary();
+  const kumaSummary = kuma.getSummary();
+  const sgSummary = siteguard.getSummary();
+  const hasSg = siteguard.data && siteguard.data.sites.length > 0;
 
+  // ---- Kuma section ----
   const groups = new Map<number | null, KumaMonitor[]>();
   for (const [, monitor] of monitors) {
     const parentId = monitor.parent ?? null;
@@ -192,47 +203,86 @@ function buildStatusEmbed(): EmbedBuilder {
     groups.get(parentId)!.push(monitor);
   }
 
-  const lines: string[] = [];
+  const kumaLines: string[] = [];
   const topLevel = groups.get(null) ?? [];
   topLevel.sort((a, b) => a.name.localeCompare(b.name));
 
   for (const monitor of topLevel) {
     const children = groups.get(monitor.id);
     if (children && children.length > 0) {
-      lines.push(`\n**${monitor.name}**`);
+      kumaLines.push(`\n**${monitor.name}**`);
       children.sort((a, b) => a.name.localeCompare(b.name));
       for (const child of children) {
-        lines.push(formatMonitorLine(child, latestStatus));
+        kumaLines.push(formatMonitorLine(child, latestStatus));
       }
     } else if (monitor.type !== "group") {
-      lines.push(formatMonitorLine(monitor, latestStatus));
+      kumaLines.push(formatMonitorLine(monitor, latestStatus));
     }
   }
 
-  let description = lines.join("\n");
-  if (description.length > 4000) {
-    description = description.slice(0, 3950) + `\n\n*... and more (${monitors.size} total)*`;
-  }
-  if (description.length === 0) {
-    description = "No monitors configured.";
+  // ---- SiteGuard section ----
+  const sgLines: string[] = [];
+  if (hasSg) {
+    const sorted = [...siteguard.data!.sites].sort((a, b) => a.domain.localeCompare(b.domain));
+    for (const site of sorted) {
+      sgLines.push(formatSiteLine(site));
+    }
   }
 
-  let color = 0x2ecc71;
-  if (summary.down > 0) color = 0xe74c3c;
-  else if (summary.pending > 0) color = 0xf39c12;
-  else if (summary.maintenance > 0) color = 0x3498db;
+  // ---- Combined header ----
+  const totalUp = kumaSummary.up + sgSummary.operational;
+  const totalActive = (kumaSummary.total - kumaSummary.paused) + sgSummary.total;
+  const totalDown = kumaSummary.down + sgSummary.down;
+
+  const headerParts: string[] = [
+    `${statusEmoji(MonitorStatus.UP)} **${totalUp}** up`,
+  ];
+  if (totalDown > 0) headerParts.push(`${statusEmoji(MonitorStatus.DOWN)} **${totalDown}** down`);
+  if (kumaSummary.pending > 0) headerParts.push(`${statusEmoji(MonitorStatus.PENDING)} **${kumaSummary.pending}** pending`);
+  if (kumaSummary.maintenance > 0) headerParts.push(`${statusEmoji(MonitorStatus.MAINTENANCE)} **${kumaSummary.maintenance}** maintenance`);
+  if (kumaSummary.paused > 0) headerParts.push(`\u23F8\uFE0F **${kumaSummary.paused}** paused`);
+  if (sgSummary.degraded > 0) headerParts.push(`${sgStatusEmoji(SgStatus.DEGRADED)} **${sgSummary.degraded}** degraded`);
+
+  // ---- Build description ----
+  let description = headerParts.join("  |  ");
+
+  // Kuma monitors
+  if (kumaLines.length > 0) {
+    description += "\n" + kumaLines.join("\n");
+  } else if (monitors.size === 0 && kuma.connected) {
+    description += "\n\nNo monitors configured.";
+  }
+
+  // SiteGuard section (separated)
+  if (hasSg) {
+    const sgHeader = [
+      `${sgStatusEmoji(SgStatus.OPERATIONAL)} **${sgSummary.operational}** operational`,
+    ];
+    if (sgSummary.degraded > 0) sgHeader.push(`${sgStatusEmoji(SgStatus.DEGRADED)} **${sgSummary.degraded}** degraded`);
+    if (sgSummary.down > 0) sgHeader.push(`${sgStatusEmoji(SgStatus.DOWN)} **${sgSummary.down}** down`);
+
+    description += `\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
+    description += `\n**WordPress Health (${sgSummary.operational}/${sgSummary.total})**`;
+    description += `\n${sgHeader.join("  |  ")}`;
+    description += "\n\n" + sgLines.join("\n");
+  }
+
+  // Truncate if too long
+  if (description.length > 4000) {
+    description = description.slice(0, 3950) + `\n\n*... truncated*`;
+  }
+
+  // ---- Color ----
+  let color = 0x2ecc71; // green
+  if (totalDown > 0) color = 0xe74c3c; // red
+  else if (kumaSummary.pending > 0 || sgSummary.degraded > 0) color = 0xf39c12; // orange
+  else if (kumaSummary.maintenance > 0) color = 0x3498db; // blue
 
   const stale = kuma.heartbeatStale;
   if (stale) color = 0xff6600;
+  if (hasSg && !siteguard.reachable) color = 0xff6600;
 
-  const headerParts: string[] = [
-    `${statusEmoji(MonitorStatus.UP)} **${summary.up}** up`,
-  ];
-  if (summary.down > 0) headerParts.push(`${statusEmoji(MonitorStatus.DOWN)} **${summary.down}** down`);
-  if (summary.pending > 0) headerParts.push(`${statusEmoji(MonitorStatus.PENDING)} **${summary.pending}** pending`);
-  if (summary.maintenance > 0) headerParts.push(`${statusEmoji(MonitorStatus.MAINTENANCE)} **${summary.maintenance}** maintenance`);
-  if (summary.paused > 0) headerParts.push(`\u23F8\uFE0F **${summary.paused}** paused`);
-
+  // ---- Timestamps ----
   const now = new Date();
   const unixTs = Math.floor(now.getTime() / 1000);
   const tz = getSetting("TIMEZONE");
@@ -248,20 +298,37 @@ function buildStatusEmbed(): EmbedBuilder {
     botTimeStr ? `Bot time: **${botTimeStr}** (${tz})` : "",
   ].filter(Boolean).join("\n");
 
-  let staleWarning = "";
+  let warnings = "";
   if (stale) {
     const staleSecs = kuma.heartbeatStalenessSeconds;
     const staleStr = staleSecs > 120
       ? `${Math.floor(staleSecs / 60)}m ${staleSecs % 60}s`
       : `${staleSecs}s`;
-    staleWarning = `\n\n\u26A0\uFE0F **Data may be stale** - no heartbeat from Kuma in ${staleStr}. Reconnecting...`;
+    warnings += `\n\n\u26A0\uFE0F **Kuma data may be stale** - no heartbeat in ${staleStr}. Reconnecting...`;
+  }
+  if (hasSg && !siteguard.reachable) {
+    warnings += "\n\n\u26A0\uFE0F **WordPress endpoint unreachable** - SiteGuard data shown may be stale.";
   }
 
+  description += timeLines + warnings;
+
+  // ---- Footer ----
+  const footerParts: string[] = [];
+  if (kuma.connected) footerParts.push("Kuma");
+  if (hasSg) {
+    const checkedAgo = siteguard.data!.checked_at > 0
+      ? `checked ${Math.floor((Date.now() / 1000 - siteguard.data!.checked_at) / 60)}m ago`
+      : "";
+    footerParts.push(`SiteGuard v${siteguard.data!.version}${checkedAgo ? ` (${checkedAgo})` : ""}`);
+  }
+  footerParts.push("Refreshes every 15s");
+  if (stale) footerParts.push("Kuma data may be stale");
+
   return new EmbedBuilder()
-    .setTitle(`Service Status (${summary.up}/${summary.total - summary.paused})`)
-    .setDescription(`${headerParts.join("  |  ")}\n${description}${timeLines}${staleWarning}`)
+    .setTitle(`Service Status (${totalUp}/${totalActive})`)
+    .setDescription(description)
     .setColor(color)
-    .setFooter({ text: stale ? "Data may be stale - reconnecting to Kuma" : "Refreshes every 15s" });
+    .setFooter({ text: footerParts.join(" | ") });
 }
 
 function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, number>): string {
@@ -274,4 +341,15 @@ function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, numbe
   const ping = kuma.latestPing.get(monitor.id) ?? kuma.avgPing.get(monitor.id);
   const pingStr = ping !== undefined && ping > 0 ? ` (${Math.round(ping)}ms)` : "";
   return `${emoji} ${monitor.name} - ${label}${pingStr}`;
+}
+
+function formatSiteLine(site: SgSite): string {
+  const emoji = sgStatusEmoji(site.status);
+  const responseMs = Math.round(site.response_time * 1000);
+  const sslStr = site.ssl_expiry_days >= 0 ? `SSL: ${site.ssl_expiry_days}d` : "";
+  const parts = [`${emoji} **${site.domain}**`, `${responseMs}ms`];
+  if (sslStr) parts.push(sslStr);
+  if (site.consecutive_failures > 1) parts.push(`\u{1F6A8} ${site.consecutive_failures} consecutive failures`);
+  if (site.error) parts.push(`\u26A0 ${site.error}`);
+  return parts.join(" - ");
 }

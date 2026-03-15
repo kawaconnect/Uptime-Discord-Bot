@@ -24,6 +24,16 @@ const envSchema = z.object({
   SG_HEALTH_URL: z.string().optional(),
   SG_HEALTH_API_KEY: z.string().optional(),
   SG_HEALTH_POLL_MS: z.coerce.number().default(60_000),
+
+  // SMTP - optional, for email alerts alongside Discord.
+  // Can also be configured at runtime via /setup smtp slash command.
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.coerce.number().default(25),
+  SMTP_SECURE: z.string().optional(),  // "true" for SSL
+  SMTP_USER: z.string().optional(),
+  SMTP_PASS: z.string().optional(),
+  SMTP_FROM: z.string().optional(),
+  SMTP_TO: z.string().optional(),       // comma-separated recipients
 });
 
 export type Env = z.infer<typeof envSchema>;

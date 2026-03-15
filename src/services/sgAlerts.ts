@@ -1,13 +1,13 @@
 /**
- * SiteGuard alert system - sends Discord alerts for:
- * - Site goes DOWN (@everyone)
+ * SiteGuard alert system - Discord alerts + optional email for:
+ * - Site goes DOWN (@everyone by default)
  * - Site recovers (UP after DOWN)
  * - SSL certificate expiring soon
- * - WordPress endpoint unreachable (@everyone)
+ * - WordPress endpoint unreachable (@everyone by default)
  * - WordPress endpoint reachable again
  *
  * Each alert type can be toggled via /sg-setup alerts-toggle.
- * Completely independent from Uptime Kuma alerts.
+ * @everyone and email are independently configurable (default: both ON for SiteGuard).
  */
 
 import {
@@ -19,11 +19,22 @@ import { logger } from "../util/logger.js";
 import { getSetting } from "../db/index.js";
 import { siteguard, sgStatusEmoji, type SgSite } from "./siteguard.js";
 import { discordQueue } from "../queue/index.js";
+import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 
 const SG_ALERT_CHANNEL_KEY = "SG_ALERT_CHANNEL_ID";
 
 function isSgEnabled(type: string): boolean {
   return getSetting(`SG_ALERT_${type.toUpperCase()}_ENABLED`) !== "false";
+}
+
+/** Whether @everyone mentions are enabled for SiteGuard alerts. Default: true. */
+function isMentionEnabled(): boolean {
+  return getSetting("SG_ALERT_MENTION_ENABLED") !== "false";
+}
+
+/** Whether email alerts are enabled for SiteGuard alerts. Default: true. */
+function isEmailEnabled(): boolean {
+  return getSetting("SG_ALERT_EMAIL_ENABLED") !== "false";
 }
 
 async function getSgAlertChannel(client: Client): Promise<TextChannel | null> {
@@ -37,6 +48,20 @@ async function getSgAlertChannel(client: Client): Promise<TextChannel | null> {
     logger.warn({ channelId }, "SiteGuard alert channel not found");
   }
   return null;
+}
+
+/** Get mention string based on config. */
+function mention(): string {
+  return isMentionEnabled() ? "@everyone" : "";
+}
+
+/** Send email if SiteGuard email alerts are enabled. */
+function maybeEmail(subject: string, html: string): void {
+  if (isEmailEnabled() && isSmtpConfigured()) {
+    sendAlertEmail(subject, html).catch((err) =>
+      logger.error({ err }, "Failed to send SG alert email")
+    );
+  }
 }
 
 export function startSgAlerts(client: Client): void {
@@ -99,10 +124,16 @@ async function sendSiteDownAlert(client: Client, site: SgSite): Promise<void> {
     .setColor(0xe74c3c)
     .setTimestamp(new Date(site.last_check * 1000));
 
+  const content = mention();
   await discordQueue.add(async () => {
-    await channel.send({ content: "@everyone", embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
   });
   logger.warn({ domain: site.domain, error: site.error }, "Sent SG site DOWN alert");
+
+  maybeEmail(
+    `[DOWN] ${site.domain}`,
+    `<h2>${site.domain} is DOWN</h2><p><b>URL:</b> ${site.url}</p><p><b>HTTP Code:</b> ${site.http_code || "N/A"}</p><p><b>Error:</b> ${site.error || "No response"}</p><p><b>Consecutive Failures:</b> ${site.consecutive_failures ?? 1}</p>`
+  );
 }
 
 async function sendSiteRecoveryAlert(client: Client, site: SgSite): Promise<void> {
@@ -124,6 +155,11 @@ async function sendSiteRecoveryAlert(client: Client, site: SgSite): Promise<void
     await channel.send({ embeds: [embed] });
   });
   logger.info({ domain: site.domain }, "Sent SG recovery alert");
+
+  maybeEmail(
+    `[RECOVERED] ${site.domain}`,
+    `<h2>${site.domain} is back UP</h2><p><b>Response Time:</b> ${Math.round(site.response_time * 1000)}ms</p>`
+  );
 }
 
 async function sendSslExpiringAlert(client: Client, site: SgSite): Promise<void> {
@@ -145,6 +181,11 @@ async function sendSslExpiringAlert(client: Client, site: SgSite): Promise<void>
     await channel.send({ embeds: [embed] });
   });
   logger.warn({ domain: site.domain, daysLeft: site.ssl_expiry_days }, "Sent SG SSL expiring alert");
+
+  maybeEmail(
+    `[SSL EXPIRING] ${site.domain} - ${site.ssl_expiry_days} days left`,
+    `<h2>SSL Certificate Expiring - ${site.domain}</h2><p><b>Days Remaining:</b> ${site.ssl_expiry_days}</p><p><b>Issuer:</b> ${site.ssl_issuer || "Unknown"}</p><p>Renew the certificate before it expires.</p>`
+  );
 }
 
 async function sendUnreachableAlert(client: Client, errorMsg: string): Promise<void> {
@@ -162,10 +203,16 @@ async function sendUnreachableAlert(client: Client, errorMsg: string): Promise<v
     .setColor(0xe74c3c)
     .setTimestamp(new Date());
 
+  const content = mention();
   await discordQueue.add(async () => {
-    await channel.send({ content: "@everyone", embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
   });
   logger.warn({ error: errorMsg }, "Sent SG WordPress unreachable alert");
+
+  maybeEmail(
+    "[UNREACHABLE] WordPress Health Endpoint",
+    `<h2>WordPress Unreachable</h2><p><b>Error:</b> ${errorMsg}</p><p>All site health data is stale.</p>`
+  );
 }
 
 async function sendReachableAlert(client: Client): Promise<void> {
@@ -187,4 +234,9 @@ async function sendReachableAlert(client: Client): Promise<void> {
     await channel.send({ embeds: [embed] });
   });
   logger.info("Sent SG WordPress reachable alert");
+
+  maybeEmail(
+    "[RESTORED] WordPress Health Endpoint",
+    `<h2>WordPress Connection Restored</h2><p>Status: ${summary.operational}/${summary.total} sites operational</p>`
+  );
 }

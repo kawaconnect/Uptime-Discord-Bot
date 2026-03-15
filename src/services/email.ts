@@ -1,0 +1,129 @@
+/**
+ * SMTP email alert service.
+ *
+ * Sends alert emails alongside Discord alerts. Supports both authenticated
+ * SMTP (e.g. Gmail, SES) and unauthenticated relay (e.g. Kubernetes postfix
+ * gateway on port 25).
+ *
+ * Config sources (priority order):
+ * 1. DB settings (set via `/setup smtp` slash command)
+ * 2. Environment variables
+ */
+
+import nodemailer from "nodemailer";
+import type { Transporter } from "nodemailer";
+import { logger } from "../util/logger.js";
+import { getSetting } from "../db/index.js";
+
+export interface SmtpConfig {
+  host: string;
+  port: number;
+  secure: boolean;
+  user?: string;
+  pass?: string;
+  from: string;
+  to: string; // comma-separated recipients
+}
+
+let transporter: Transporter | null = null;
+let currentConfig: SmtpConfig | null = null;
+
+/** Read SMTP config from DB settings, falling back to env vars. */
+function readConfig(): SmtpConfig | null {
+  const host = getSetting("SMTP_HOST") ?? process.env.SMTP_HOST;
+  const from = getSetting("SMTP_FROM") ?? process.env.SMTP_FROM;
+  const to = getSetting("SMTP_TO") ?? process.env.SMTP_TO;
+
+  if (!host || !from || !to) return null;
+
+  const portStr = getSetting("SMTP_PORT") ?? process.env.SMTP_PORT;
+  const secureStr = getSetting("SMTP_SECURE") ?? process.env.SMTP_SECURE;
+
+  return {
+    host,
+    port: portStr ? parseInt(portStr, 10) : 25,
+    secure: secureStr === "true",
+    user: getSetting("SMTP_USER") ?? process.env.SMTP_USER ?? undefined,
+    pass: getSetting("SMTP_PASS") ?? process.env.SMTP_PASS ?? undefined,
+    from,
+    to,
+  };
+}
+
+/** (Re)configure the SMTP transporter from current settings. */
+export function configureSmtp(): void {
+  const config = readConfig();
+  if (!config) {
+    transporter = null;
+    currentConfig = null;
+    return;
+  }
+
+  const opts: nodemailer.TransportOptions & { host: string; port: number; secure: boolean; auth?: { user: string; pass: string } } = {
+    host: config.host,
+    port: config.port,
+    secure: config.secure,
+  };
+
+  // Only add auth if credentials are provided (relay mode skips auth)
+  if (config.user && config.pass) {
+    opts.auth = { user: config.user, pass: config.pass };
+  }
+
+  transporter = nodemailer.createTransport(opts as any);
+  currentConfig = config;
+  logger.info({ host: config.host, port: config.port, from: config.from, to: config.to, auth: !!config.user }, "SMTP configured");
+}
+
+export function isSmtpConfigured(): boolean {
+  if (!transporter || !currentConfig) {
+    // Try to configure on the fly in case settings were added at runtime
+    configureSmtp();
+  }
+  return transporter !== null && currentConfig !== null;
+}
+
+export function getSmtpConfig(): SmtpConfig | null {
+  if (!currentConfig) configureSmtp();
+  return currentConfig;
+}
+
+/**
+ * Send an alert email. Fails silently (logs error) - never throws.
+ */
+export async function sendAlertEmail(subject: string, html: string): Promise<void> {
+  if (!transporter || !currentConfig) return;
+
+  try {
+    await transporter.sendMail({
+      from: currentConfig.from,
+      to: currentConfig.to,
+      subject,
+      html,
+    });
+    logger.info({ subject, to: currentConfig.to }, "Alert email sent");
+  } catch (err) {
+    logger.error({ err, subject }, "Failed to send alert email");
+  }
+}
+
+/**
+ * Send a test email to verify configuration.
+ * Unlike sendAlertEmail, this throws on failure so the caller can report it.
+ */
+export async function sendTestEmail(): Promise<void> {
+  if (!transporter || !currentConfig) {
+    throw new Error("SMTP is not configured");
+  }
+
+  await transporter.sendMail({
+    from: currentConfig.from,
+    to: currentConfig.to,
+    subject: "Uptime Bot - SMTP Test",
+    html: `<h2>SMTP Configuration Test</h2>
+<p>This is a test email from the Uptime Discord Bot.</p>
+<p>If you received this, your SMTP settings are working correctly.</p>
+<hr>
+<p><small>Host: ${currentConfig.host}:${currentConfig.port} | From: ${currentConfig.from}</small></p>`,
+  });
+}

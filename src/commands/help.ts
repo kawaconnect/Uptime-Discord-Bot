@@ -38,10 +38,13 @@ export async function handleHelpCommand(
       {
         name: "Setup (admin only)",
         value: [
-          "`/setup status <channel>` - Set the auto-updating status board channel",
-          "`/setup alerts <channel>` - Set the @everyone alert channel",
+          "`/setup status <channel>` - Set the unified status board channel (Kuma + SiteGuard)",
+          "`/setup alerts <channel>` - Set the Kuma alert channel",
           "`/setup timezone <tz>` - Set bot timezone (e.g. America/New_York)",
-          "`/setup alerts-toggle <type> <on|off>` - Enable/disable alert types",
+          "`/setup alerts-toggle <type> <on|off>` - Toggle alert types, @everyone, email for Kuma",
+          "`/setup smtp <host> <port> <from> <to> [user] [pass]` - Configure SMTP email",
+          "`/setup smtp-test` - Send a test email",
+          "`/setup smtp-clear` - Remove SMTP configuration",
           "`/setup show` - Show current configuration",
         ].join("\n"),
         inline: false,
@@ -49,11 +52,12 @@ export async function handleHelpCommand(
       {
         name: "Auto Features",
         value: [
-          "**Status Board** - Auto-updating embed showing all monitors (configure with `/setup status`)",
-          "**Down Alerts** - @everyone when a monitor goes DOWN",
+          "**Status Board** - Unified embed showing Kuma monitors + WordPress health (configure with `/setup status`)",
+          "**Down Alerts** - When a monitor goes DOWN (Kuma: no @everyone by default, SG: @everyone by default)",
           "**Recovery Alerts** - Notice when a service comes back UP",
-          "**Disconnect Alert** - @everyone if connection to Uptime Kuma is lost 30+ seconds",
-          "**Bot Presence** - Shows X/Y services up in the member list",
+          "**Disconnect Alert** - If connection to Uptime Kuma is lost 30+ seconds",
+          "**Email Alerts** - SMTP email alongside Discord (SG: on by default, Kuma: off by default)",
+          "**Bot Presence** - Shows combined X/Y services up in the member list",
         ].join("\n"),
         inline: false,
       }
@@ -72,7 +76,7 @@ export async function handleHelpCommand(
           "`/sg-status` - WordPress multisite health summary",
           "`/sg-monitors [filter]` - List all subsites (filter: all, operational, degraded, down)",
           "`/sg-downtime` - Show currently down WordPress subsites",
-          "`/sg-refresh` - Force refresh the SiteGuard status board",
+          "`/sg-refresh` - Force refresh the status board",
         ].join("\n"),
         inline: false,
       },
@@ -81,9 +85,8 @@ export async function handleHelpCommand(
         value: [
           "`/sg-setup connect <url> <api_key>` - Connect to a SiteGuard WordPress endpoint",
           "`/sg-setup disconnect` - Disconnect from the health endpoint",
-          "`/sg-setup status <channel>` - Set the SiteGuard status board channel",
           "`/sg-setup alerts <channel>` - Set the SiteGuard alert channel",
-          "`/sg-setup alerts-toggle <type> <on|off>` - Toggle SiteGuard alert types",
+          "`/sg-setup alerts-toggle <type> <on|off>` - Toggle alert types, @everyone, email for SG",
           "`/sg-setup show` - Show SiteGuard configuration",
         ].join("\n"),
         inline: false,
@@ -91,11 +94,11 @@ export async function handleHelpCommand(
       {
         name: "SiteGuard Auto Features",
         value: [
-          "**Health Board** - Auto-updating embed showing WordPress site health (configure with `/sg-setup status`)",
-          "**Site Down Alerts** - @everyone when a WordPress site goes down",
+          "**Site Down Alerts** - @everyone when a WordPress site goes down (configurable)",
           "**Recovery Alerts** - Notice when a site comes back up",
           "**SSL Expiry Warnings** - Alert when certificates are expiring soon",
           "**WP Unreachable** - @everyone if the WordPress health endpoint can't be reached",
+          "**Email Alerts** - Enabled by default for SiteGuard (configure SMTP with `/setup smtp`)",
         ].join("\n"),
         inline: false,
       }
