@@ -2,6 +2,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { env } from "../util/env.js";
 import { logger } from "../util/logger.js";
 import { kuma, statusLabel } from "../services/kuma.js";
+import { siteguard } from "../services/siteguard.js";
 
 export async function startWebServer(): Promise<FastifyInstance> {
   const app = Fastify({ logger: false });
@@ -50,6 +51,17 @@ export async function startWebServer(): Promise<FastifyInstance> {
       summary,
       monitors,
       serverInfo: kuma.serverInfo,
+    };
+  });
+
+  app.get("/debug/siteguard", async () => {
+    return {
+      reachable: siteguard.reachable,
+      lastPoll: siteguard.data?.checked_at ?? null,
+      overallStatus: siteguard.data?.status ?? null,
+      summary: siteguard.getSummary(),
+      sites: siteguard.sites,
+      wpVersion: siteguard.data?.version ?? null,
     };
   });
 

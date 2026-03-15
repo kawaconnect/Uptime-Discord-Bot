@@ -3,6 +3,7 @@ import {
   ChatInputCommandInteraction,
   EmbedBuilder,
 } from "discord.js";
+// SG commands are always available (connect via /sg-setup connect)
 
 export const helpCommand = new SlashCommandBuilder()
   .setName("help")
@@ -53,6 +54,48 @@ export async function handleHelpCommand(
           "**Recovery Alerts** - Notice when a service comes back UP",
           "**Disconnect Alert** - @everyone if connection to Uptime Kuma is lost 30+ seconds",
           "**Bot Presence** - Shows X/Y services up in the member list",
+        ].join("\n"),
+        inline: false,
+      }
+    );
+
+  // SiteGuard Health Monitor commands (always available - connect via /sg-setup connect)
+  embed.addFields(
+      {
+        name: "\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500",
+        value: "**SiteGuard Health Monitor**",
+        inline: false,
+      },
+      {
+        name: "WordPress Health",
+        value: [
+          "`/sg-status` - WordPress multisite health summary",
+          "`/sg-monitors [filter]` - List all subsites (filter: all, operational, degraded, down)",
+          "`/sg-downtime` - Show currently down WordPress subsites",
+          "`/sg-refresh` - Force refresh the SiteGuard status board",
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "SiteGuard Setup (admin only)",
+        value: [
+          "`/sg-setup connect <url> <api_key>` - Connect to a SiteGuard WordPress endpoint",
+          "`/sg-setup disconnect` - Disconnect from the health endpoint",
+          "`/sg-setup status <channel>` - Set the SiteGuard status board channel",
+          "`/sg-setup alerts <channel>` - Set the SiteGuard alert channel",
+          "`/sg-setup alerts-toggle <type> <on|off>` - Toggle SiteGuard alert types",
+          "`/sg-setup show` - Show SiteGuard configuration",
+        ].join("\n"),
+        inline: false,
+      },
+      {
+        name: "SiteGuard Auto Features",
+        value: [
+          "**Health Board** - Auto-updating embed showing WordPress site health (configure with `/sg-setup status`)",
+          "**Site Down Alerts** - @everyone when a WordPress site goes down",
+          "**Recovery Alerts** - Notice when a site comes back up",
+          "**SSL Expiry Warnings** - Alert when certificates are expiring soon",
+          "**WP Unreachable** - @everyone if the WordPress health endpoint can't be reached",
         ].join("\n"),
         inline: false,
       }

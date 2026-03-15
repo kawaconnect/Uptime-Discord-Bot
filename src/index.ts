@@ -21,6 +21,16 @@ import {
   downtimeCommand,
   refreshCommand,
 } from "./commands/status.js";
+import { siteguard } from "./services/siteguard.js";
+import { startSgStatusBoard, stopSgStatusBoard } from "./services/sgStatusBoard.js";
+import { startSgAlerts } from "./services/sgAlerts.js";
+import { sgSetupCommand } from "./commands/sg-setup.js";
+import {
+  sgStatusCommand,
+  sgMonitorsCommand,
+  sgDowntimeCommand,
+  sgRefreshCommand,
+} from "./commands/sg-status.js";
 
 let server: Awaited<ReturnType<typeof startWebServer>> | null = null;
 
@@ -37,6 +47,16 @@ async function deployCommands() {
     downtimeCommand.toJSON(),
     refreshCommand.toJSON(),
   ];
+
+  // SiteGuard commands - always registered so /sg-setup connect can be used
+  // to configure the connection at runtime without restarting the bot
+  commands.push(
+    sgSetupCommand.toJSON(),
+    sgStatusCommand.toJSON(),
+    sgMonitorsCommand.toJSON(),
+    sgDowntimeCommand.toJSON(),
+    sgRefreshCommand.toJSON(),
+  );
 
   const rest = new REST().setToken(config.DISCORD_TOKEN);
 
@@ -92,6 +112,18 @@ async function main() {
     }, 5_000);
   });
 
+  // SiteGuard Health Monitor (independent from Kuma)
+  // Starts if configured via env vars OR via /sg-setup connect slash command (DB settings)
+  if (siteguard.isConfigured) {
+    logger.info({ url: siteguard.getUrl() }, "Starting SiteGuard health monitor");
+    siteguard.start();
+
+    siteguard.once("updated", () => {
+      startSgStatusBoard(client);
+      startSgAlerts(client);
+    });
+  }
+
   logger.info("Bot started - waiting for Uptime Kuma connection");
 }
 
@@ -101,6 +133,8 @@ async function main() {
 
 async function shutdown(signal: string) {
   logger.info({ signal }, "Shutting down");
+  siteguard.stop();
+  stopSgStatusBoard();
   kuma.disconnect();
   if (server) { try { await server.close(); } catch { /* ignore */ } }
   closeDb();

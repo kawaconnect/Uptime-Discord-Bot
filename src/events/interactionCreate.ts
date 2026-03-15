@@ -12,6 +12,13 @@ import {
   handleRefreshCommand,
   handleMonitorAutocomplete,
 } from "../commands/status.js";
+import { handleSgSetupCommand } from "../commands/sg-setup.js";
+import {
+  handleSgStatusCommand,
+  handleSgMonitorsCommand,
+  handleSgDowntimeCommand,
+  handleSgRefreshCommand,
+} from "../commands/sg-status.js";
 
 export function onInteractionCreate(client: Client): void {
   client.on(Events.InteractionCreate, async (interaction) => {
@@ -38,6 +45,12 @@ export function onInteractionCreate(client: Client): void {
         case "resume": await handleResumeCommand(interaction); break;
         case "downtime": await handleDowntimeCommand(interaction); break;
         case "refresh": await handleRefreshCommand(interaction); break;
+        // SiteGuard commands
+        case "sg-setup": await handleSgSetupCommand(interaction); break;
+        case "sg-status": await handleSgStatusCommand(interaction); break;
+        case "sg-monitors": await handleSgMonitorsCommand(interaction); break;
+        case "sg-downtime": await handleSgDowntimeCommand(interaction); break;
+        case "sg-refresh": await handleSgRefreshCommand(interaction); break;
         default:
           await interaction.reply({ content: "Unknown command.", ephemeral: true });
       }

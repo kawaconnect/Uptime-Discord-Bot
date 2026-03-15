@@ -18,6 +18,12 @@ const envSchema = z.object({
   KUMA_URL: z.string().min(1),
   KUMA_USERNAME: z.string().optional(),
   KUMA_PASSWORD: z.string().optional(),
+
+  // SiteGuard Health Monitor - optional, bot works without it.
+  // Set SG_HEALTH_URL to enable the WordPress health monitoring module.
+  SG_HEALTH_URL: z.string().optional(),
+  SG_HEALTH_API_KEY: z.string().optional(),
+  SG_HEALTH_POLL_MS: z.coerce.number().default(60_000),
 });
 
 export type Env = z.infer<typeof envSchema>;
