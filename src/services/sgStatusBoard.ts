@@ -153,6 +153,7 @@ function buildSgStatusEmbed(): EmbedBuilder {
     const sslStr = site.ssl_expiry_days >= 0 ? `SSL: ${site.ssl_expiry_days}d` : "";
     const parts = [`${emoji} **${site.domain}**`, `${responseMs}ms`];
     if (sslStr) parts.push(sslStr);
+    if (site.consecutive_failures > 1) parts.push(`\u{1F6A8} ${site.consecutive_failures} consecutive failures`);
     if (site.error) parts.push(`\u26A0 ${site.error}`);
     lines.push(parts.join(" - "));
   }
@@ -191,5 +192,5 @@ function buildSgStatusEmbed(): EmbedBuilder {
     .setTitle(`WordPress Health (${summary.operational}/${summary.total})`)
     .setDescription(`${headerParts.join("  |  ")}\n\n${description}${timeLines}${unreachableWarning}`)
     .setColor(color)
-    .setFooter({ text: `SiteGuard v${data.version} | ${checkedAgo} | Refreshes every 30s` });
+    .setFooter({ text: `SiteGuard v${data.version} | WP checks every ${Math.round((data.check_interval ?? 600) / 60)}min | ${checkedAgo}` });
 }

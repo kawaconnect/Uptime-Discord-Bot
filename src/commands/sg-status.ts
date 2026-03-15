@@ -75,6 +75,9 @@ export async function handleSgStatusCommand(
   if (data.checked_at > 0) {
     lines.push(`\nLast checked: <t:${data.checked_at}:R>`);
   }
+  if (data.check_interval) {
+    lines.push(`Check interval: every ${Math.round(data.check_interval / 60)} minutes`);
+  }
 
   if (!siteguard.reachable) {
     lines.push("\n\u26A0\uFE0F **WordPress endpoint is currently unreachable**");
@@ -85,7 +88,8 @@ export async function handleSgStatusCommand(
   if (downSites.length > 0) {
     lines.push("\n**Down sites:**");
     for (const site of downSites) {
-      lines.push(`${sgStatusEmoji("down")} ${site.domain} - ${site.error || "No response"}`);
+      const failures = site.consecutive_failures > 1 ? ` (${site.consecutive_failures} consecutive)` : "";
+      lines.push(`${sgStatusEmoji("down")} ${site.domain} - ${site.error || "No response"}${failures}`);
     }
   }
 

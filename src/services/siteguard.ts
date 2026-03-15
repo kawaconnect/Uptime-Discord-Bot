@@ -26,12 +26,16 @@ export interface SgSite {
   ssl_issuer: string;
   last_check: number;
   error: string;
+  consecutive_failures: number;
+  check_method: string;
 }
 
 export interface SgHealthResponse {
   status: string;
   site_url: string;
   checked_at: number;
+  check_interval: number;
+  check_interval_label: string;
   sites: SgSite[];
   version: string;
 }

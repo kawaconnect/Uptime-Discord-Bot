@@ -93,6 +93,7 @@ async function sendSiteDownAlert(client: Client, site: SgSite): Promise<void> {
       `**HTTP Code:** ${site.http_code || "N/A"}\n` +
       `**Error:** ${site.error || "No response"}\n` +
       `**Response Time:** ${Math.round(site.response_time * 1000)}ms\n` +
+      `**Consecutive Failures:** ${site.consecutive_failures ?? 1}\n` +
       `**Detected:** <t:${site.last_check}:R>`
     )
     .setColor(0xe74c3c)
