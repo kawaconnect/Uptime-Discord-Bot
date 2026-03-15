@@ -180,7 +180,7 @@ class SiteGuardClient extends EventEmitter {
         if (!this._firstPoll && prev !== undefined) {
           // Status change detection
           if (site.status === "down" && prev !== "down") {
-            this.emit("siteDown", site, false);
+            this.emit("siteDown", site);
           } else if (site.status !== "down" && prev === "down") {
             this.emit("siteRecovery", site);
           }
