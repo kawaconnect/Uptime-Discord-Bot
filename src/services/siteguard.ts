@@ -195,7 +195,7 @@ class SiteGuardClient extends EventEmitter {
       }
 
       // Compare per-site statuses for change detection
-      const sslWarnDays = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10);
+      const sslWarnDays = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14;
 
       for (const site of data.sites) {
         const prev = this._previousStatuses.get(site.site_id);
@@ -302,7 +302,7 @@ class SiteGuardClient extends EventEmitter {
   }
 
   getSslExpiring(): SgSite[] {
-    const warn = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10);
+    const warn = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14;
     return this.sites.filter((s) => s.ssl_expiry_days >= 0 && s.ssl_expiry_days <= warn);
   }
 }

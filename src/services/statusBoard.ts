@@ -26,7 +26,7 @@ const STATUS_MSG_KEY = "STATUS_MESSAGE_ID";
 const REFRESH_INTERVAL_MS = 15_000;
 
 /** SiteGuard data older than this is considered stale (default: 30 minutes). */
-const SG_STALE_THRESHOLD_MS = 30 * 60 * 1000;
+const SG_STALE_THRESHOLD_SEC = 30 * 60;
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let needsReanchor = false;
@@ -225,7 +225,7 @@ function buildStatusEmbed(): EmbedBuilder {
 
   // ---- SiteGuard section ----
   const sgCheckedAt = siteguard.data?.checked_at ?? 0;
-  const sgDataStale = !!hasSg && (Date.now() / 1000 - sgCheckedAt) * 1000 > SG_STALE_THRESHOLD_MS;
+  const sgDataStale = !!hasSg && (Date.now() / 1000 - sgCheckedAt) > SG_STALE_THRESHOLD_SEC;
   const sgLines: string[] = [];
   if (hasSg) {
     const sorted = [...siteguard.data!.sites].sort((a, b) => a.domain.localeCompare(b.domain));
