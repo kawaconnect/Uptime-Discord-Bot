@@ -81,6 +81,11 @@ export function sgStatusColor(status: string): number {
 // Client
 // ---------------------------------------------------------------
 
+/** If SiteGuard's checked_at is older than this, trigger a POST to force a fresh check. */
+const SG_STALE_THRESHOLD_SEC = 30 * 60; // 30 minutes
+/** Minimum time between force-check POSTs to avoid hammering WordPress. */
+const SG_FORCE_CHECK_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes
+
 class SiteGuardClient extends EventEmitter {
   private _data: SgHealthResponse | null = null;
   private _previousStatuses = new Map<number, string>();
@@ -88,11 +93,16 @@ class SiteGuardClient extends EventEmitter {
   private _reachable = true;
   private _sslAlerted = new Set<number>();
   private _firstPoll = true;
+  private _lastForceCheckAt = 0;
 
   get data(): SgHealthResponse | null { return this._data; }
   get reachable(): boolean { return this._reachable; }
   get sites(): SgSite[] { return this._data?.sites ?? []; }
   get isConfigured(): boolean { return !!this.getUrl(); }
+  get dataStale(): boolean {
+    if (!this._data) return false;
+    return (Date.now() / 1000 - (this._data.checked_at || 0)) > SG_STALE_THRESHOLD_SEC;
+  }
 
   /** Get the effective URL - DB setting overrides env var. */
   getUrl(): string | undefined {
@@ -164,6 +174,19 @@ class SiteGuardClient extends EventEmitter {
       const data = await response.json() as SgHealthResponse;
       this._data = data;
 
+      // If the health data is stale (WordPress cron stopped), trigger a force check via POST.
+      const dataAge = Date.now() / 1000 - (data.checked_at || 0);
+      if (dataAge > SG_STALE_THRESHOLD_SEC && Date.now() - this._lastForceCheckAt > SG_FORCE_CHECK_COOLDOWN_MS) {
+        logger.warn(
+          { dataAgeSec: Math.floor(dataAge), checkedAt: data.checked_at },
+          "SiteGuard data is stale - triggering force check via POST"
+        );
+        this._lastForceCheckAt = Date.now();
+        this.forceCheck(url, apiKey).catch((err) =>
+          logger.warn({ err }, "SiteGuard force check failed")
+        );
+      }
+
       // Reachability state change
       if (!this._reachable) {
         this._reachable = true;
@@ -217,6 +240,50 @@ class SiteGuardClient extends EventEmitter {
       } else {
         logger.debug({ err }, "SiteGuard still unreachable");
       }
+    }
+  }
+
+  /**
+   * Trigger an on-demand health check via POST. SiteGuard's cron can stop
+   * if WordPress doesn't receive traffic, so this keeps data fresh.
+   * The response contains the fresh health data which we apply immediately.
+   */
+  private async forceCheck(url: string, apiKey: string | undefined): Promise<void> {
+    // POST to /health/check (same base URL but with /check appended)
+    const checkUrl = url.replace(/\/health\/?$/, "/health/check");
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30_000);
+
+    try {
+      const response = await fetch(checkUrl, {
+        method: "POST",
+        headers: {
+          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+          Accept: "application/json",
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+
+      if (!response.ok) {
+        // 429 = cooldown, that's expected - we'll get fresh data on the next GET poll
+        if (response.status === 429) {
+          logger.info("SiteGuard force check throttled (cooldown) - will retry later");
+          return;
+        }
+        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      }
+
+      const data = await response.json() as SgHealthResponse;
+      this._data = data;
+      logger.info(
+        { checkedAt: data.checked_at, siteCount: data.sites.length },
+        "SiteGuard force check successful - fresh data applied"
+      );
+      this.emit("updated", data);
+    } catch (err) {
+      clearTimeout(timeout);
+      throw err;
     }
   }
 

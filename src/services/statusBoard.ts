@@ -25,6 +25,9 @@ const STATUS_MSG_KEY = "STATUS_MESSAGE_ID";
 /** Refresh the board every 15 seconds no matter what. */
 const REFRESH_INTERVAL_MS = 15_000;
 
+/** SiteGuard data older than this is considered stale (default: 30 minutes). */
+const SG_STALE_THRESHOLD_MS = 30 * 60 * 1000;
+
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let needsReanchor = false;
 /** Mutex - prevents concurrent updateStatusBoard calls from racing. */
@@ -221,11 +224,13 @@ function buildStatusEmbed(): EmbedBuilder {
   }
 
   // ---- SiteGuard section ----
+  const sgCheckedAt = siteguard.data?.checked_at ?? 0;
+  const sgDataStale = !!hasSg && (Date.now() / 1000 - sgCheckedAt) * 1000 > SG_STALE_THRESHOLD_MS;
   const sgLines: string[] = [];
   if (hasSg) {
     const sorted = [...siteguard.data!.sites].sort((a, b) => a.domain.localeCompare(b.domain));
     for (const site of sorted) {
-      sgLines.push(formatSiteLine(site));
+      sgLines.push(formatSiteLine(site, sgDataStale));
     }
   }
 
@@ -281,6 +286,7 @@ function buildStatusEmbed(): EmbedBuilder {
   const stale = kuma.heartbeatStale;
   if (stale) color = 0xff6600;
   if (hasSg && !siteguard.reachable) color = 0xff6600;
+  if (sgDataStale) color = 0xe74c3c; // red - SiteGuard data is stale
 
   // ---- Timestamps ----
   const now = new Date();
@@ -308,6 +314,14 @@ function buildStatusEmbed(): EmbedBuilder {
   }
   if (hasSg && !siteguard.reachable) {
     warnings += "\n\n\u26A0\uFE0F **WordPress endpoint unreachable** - SiteGuard data shown may be stale.";
+  } else if (sgDataStale) {
+    const staleMin = Math.floor((Date.now() / 1000 - sgCheckedAt) / 60);
+    const staleStr = staleMin >= 1440
+      ? `${Math.floor(staleMin / 1440)}d ${Math.floor((staleMin % 1440) / 60)}h`
+      : staleMin >= 60
+        ? `${Math.floor(staleMin / 60)}h ${staleMin % 60}m`
+        : `${staleMin}m`;
+    warnings += `\n\n\u{1F534} **SiteGuard data is stale** - WordPress health check last ran ${staleStr} ago. SSL expiry days may be inaccurate. Check WordPress cron.`;
   }
 
   description += timeLines + warnings;
@@ -343,10 +357,12 @@ function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, numbe
   return `${emoji} ${monitor.name} - ${label}${pingStr}`;
 }
 
-function formatSiteLine(site: SgSite): string {
+function formatSiteLine(site: SgSite, dataStale: boolean): string {
   const emoji = sgStatusEmoji(site.status);
   const responseMs = Math.round(site.response_time * 1000);
-  const sslStr = site.ssl_expiry_days >= 0 ? `SSL: ${site.ssl_expiry_days}d` : "";
+  const sslStr = site.ssl_expiry_days >= 0
+    ? dataStale ? `SSL: ~${site.ssl_expiry_days}d \u26A0` : `SSL: ${site.ssl_expiry_days}d`
+    : "";
   const parts = [`${emoji} **${site.domain}**`, `${responseMs}ms`];
   if (sslStr) parts.push(sslStr);
   if (site.consecutive_failures > 1) parts.push(`\u{1F6A8} ${site.consecutive_failures} consecutive failures`);

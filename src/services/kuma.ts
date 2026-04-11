@@ -133,6 +133,8 @@ class KumaClient extends EventEmitter {
   /** Latest ping from real-time heartbeats (not smoothed). */
   private _latestPing = new Map<number, number>();
   private _uptime24h = new Map<number, number>();
+  /** TLS certificate info from Kuma's certInfo events. */
+  private _certInfo = new Map<number, Record<string, unknown>>();
   private _connected = false;
   private _authenticated = false;
   private _jwtToken: string | null = null;
@@ -171,6 +173,7 @@ class KumaClient extends EventEmitter {
   get latestPing(): Map<number, number> { return this._latestPing; }
   get uptime24h(): Map<number, number> { return this._uptime24h; }
   get connected(): boolean { return this._connected && this._authenticated; }
+  get certInfo(): Map<number, Record<string, unknown>> { return this._certInfo; }
   get serverInfo() { return this._info; }
   get lastHeartbeatAt(): number { return Math.max(this._lastHeartbeatAt, this._lastHeartbeatListAt); }
   get lastDataAt(): number { return this._lastDataAt; }
@@ -222,7 +225,7 @@ class KumaClient extends EventEmitter {
       // Skip noisy events we already handle, but log unknown ones
       const known = ["connect", "disconnect", "connect_error", "autoLogin",
         "monitorList", "heartbeat", "heartbeatList", "importantHeartbeatList",
-        "avgPing", "uptime", "info"];
+        "avgPing", "uptime", "info", "certInfo"];
       if (!known.includes(event)) {
         logger.info({ event, argCount: args.length }, "Unknown socket event received");
       }
@@ -394,6 +397,12 @@ class KumaClient extends EventEmitter {
       logger.info({ version: this._info.version, tz: this._info.serverTimezone }, "Kuma server info");
     });
 
+    // certInfo is sent by Kuma for HTTPS monitors - store it for potential use
+    this.socket.on("certInfo", (monitorId: string, certData: Record<string, unknown>) => {
+      this._lastDataAt = Date.now();
+      this._certInfo.set(Number(monitorId), certData);
+    });
+
     this.startWatchdog();
     this.startMonitorRefresh();
   }
@@ -490,6 +499,7 @@ class KumaClient extends EventEmitter {
     this._avgPing.clear();
     this._latestPing.clear();
     this._uptime24h.clear();
+    this._certInfo.clear();
     this._lastHeartbeatAt = 0;
     this._lastHeartbeatListAt = 0;
     this._lastDataAt = 0;
