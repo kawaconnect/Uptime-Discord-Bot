@@ -32,8 +32,16 @@ let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let needsReanchor = false;
 /** Mutex - prevents concurrent updateStatusBoard calls from racing. */
 let updating = false;
+/** Guard against double-registration of listeners and the refresh timer. */
+let boardStarted = false;
 
 export function startStatusBoard(client: Client): void {
+  if (boardStarted) {
+    logger.debug("Status board already started - skipping duplicate registration");
+    return;
+  }
+  boardStarted = true;
+
   // Status changes get an immediate update
   kuma.on("statusChange", () => {
     logger.info("statusChange event - immediate board update");
@@ -88,6 +96,7 @@ export function startStatusBoard(client: Client): void {
 
 export function stopStatusBoard(): void {
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  boardStarted = false;
 }
 
 export async function updateStatusBoard(client: Client): Promise<void> {

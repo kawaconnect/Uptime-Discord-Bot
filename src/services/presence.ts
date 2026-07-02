@@ -12,8 +12,16 @@ import { siteguard } from "./siteguard.js";
 
 let updateTimer: ReturnType<typeof setTimeout> | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
+/** Guard against double-registration of listeners and the refresh timer. */
+let presenceStarted = false;
 
 export function startPresence(client: Client): void {
+  if (presenceStarted) {
+    logger.debug("Presence already started - skipping duplicate registration");
+    return;
+  }
+  presenceStarted = true;
+
   // Set initial presence
   updatePresence(client);
 
@@ -67,6 +75,7 @@ export function startPresence(client: Client): void {
 export function stopPresence(): void {
   if (updateTimer) { clearTimeout(updateTimer); updateTimer = null; }
   if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+  presenceStarted = false;
 }
 
 function scheduleUpdate(client: Client): void {

@@ -26,6 +26,8 @@ const DISCONNECT_GRACE_MS = 30_000;
 
 let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wasDisconnected = false;
+/** Guard against double-registration of Kuma event listeners. */
+let alertsStarted = false;
 
 function isEnabled(type: string): boolean {
   return getSetting(`ALERT_${type.toUpperCase()}_ENABLED`) !== "false";
@@ -42,6 +44,12 @@ function isEmailEnabled(): boolean {
 }
 
 export function startAlerts(client: Client): void {
+  if (alertsStarted) {
+    logger.debug("Kuma alerts already started - skipping duplicate registration");
+    return;
+  }
+  alertsStarted = true;
+
   // ---- Connection loss (socket-level disconnect) ----
   kuma.on("disconnected", (reason) => {
     if (disconnectTimer) clearTimeout(disconnectTimer);

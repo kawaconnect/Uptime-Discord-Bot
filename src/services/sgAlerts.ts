@@ -37,6 +37,14 @@ function isEmailEnabled(): boolean {
   return getSetting("SG_ALERT_EMAIL_ENABLED") !== "false";
 }
 
+/**
+ * Guard against double-registration. `startSgAlerts` is wired to
+ * `siteguard.once("updated")` from both bot startup AND every `/sg-setup connect`,
+ * so without this guard the event listeners (and therefore the alerts) would
+ * duplicate each time an admin reconnects.
+ */
+let alertsStarted = false;
+
 async function getSgAlertChannel(client: Client): Promise<TextChannel | null> {
   const channelId = getSetting(SG_ALERT_CHANNEL_KEY);
   if (!channelId) return null;
@@ -65,6 +73,12 @@ function maybeEmail(subject: string, html: string): void {
 }
 
 export function startSgAlerts(client: Client): void {
+  if (alertsStarted) {
+    logger.debug("SiteGuard alerts already started - skipping duplicate registration");
+    return;
+  }
+  alertsStarted = true;
+
   // ---- Site goes DOWN ----
   siteguard.on("siteDown", (site: SgSite) => {
     if (!isSgEnabled("SITE_DOWN")) return;

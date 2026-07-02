@@ -168,6 +168,14 @@ export async function handleSgMonitorsCommand(
 export async function handleSgDowntimeCommand(
   interaction: ChatInputCommandInteraction
 ): Promise<void> {
+  if (!siteguard.data) {
+    await interaction.reply({
+      content: "No health data available yet. The SiteGuard monitor may still be initialising or is not configured.",
+      ephemeral: true,
+    });
+    return;
+  }
+
   const downSites = siteguard.getDownSites();
 
   if (downSites.length === 0) {
