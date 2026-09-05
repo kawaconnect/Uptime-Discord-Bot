@@ -26,6 +26,10 @@ const envSchema = z.object({
   SG_HEALTH_POLL_MS: z.coerce.number().default(60_000),
   // Minutes between reminder alerts while an outage persists (0 = off).
   SG_ALERT_REPEAT_MIN: z.coerce.number().default(30),
+  // Bot-side direct HTTP probe of every known site (independent of the
+  // SiteGuard endpoint). "false" disables. Down after N consecutive failures.
+  SG_DIRECT_PROBE: z.string().optional(),
+  SG_DIRECT_PROBE_FAILS: z.coerce.number().default(2),
 
   // Zammad ticketing - optional. When both are set, a ticket is opened per
   // incident (site down / WordPress unreachable) and closed on recovery.
@@ -36,6 +40,8 @@ const envSchema = z.object({
   ZAMMAD_TICKET_GROUP: z.string().optional(),
   ZAMMAD_TICKET_CUSTOMER: z.string().optional(),
   ZAMMAD_TICKET_CLOSE_ON_RECOVERY: z.string().optional(),
+  // fallback (default): API ticket only if the alert email failed; always; off
+  ZAMMAD_TICKET_MODE: z.string().optional(),
 
   // SMTP - optional, for email alerts alongside Discord.
   // Can also be configured at runtime via /setup smtp slash command.

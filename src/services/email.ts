@@ -89,22 +89,29 @@ export function getSmtpConfig(): SmtpConfig | null {
 }
 
 /**
- * Send an alert email. Fails silently (logs error) - never throws.
+ * Send an alert email. Never throws; returns true only when the relay accepted
+ * the message, so callers can fall back to another channel (Zammad API ticket)
+ * when it did not. One retry after 5s covers a relay pod restart.
  */
-export async function sendAlertEmail(subject: string, html: string): Promise<void> {
-  if (!transporter || !currentConfig) return;
+export async function sendAlertEmail(subject: string, html: string): Promise<boolean> {
+  if (!transporter || !currentConfig) return false;
 
-  try {
-    await transporter.sendMail({
-      from: currentConfig.from,
-      to: currentConfig.to,
-      subject,
-      html,
-    });
-    logger.info({ subject, to: currentConfig.to }, "Alert email sent");
-  } catch (err) {
-    logger.error({ err, subject }, "Failed to send alert email");
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      await transporter.sendMail({
+        from: currentConfig.from,
+        to: currentConfig.to,
+        subject,
+        html,
+      });
+      logger.info({ subject, to: currentConfig.to, attempt }, "Alert email sent");
+      return true;
+    } catch (err) {
+      logger.error({ err, subject, attempt }, "Failed to send alert email");
+      if (attempt === 1) await new Promise((r) => setTimeout(r, 5_000));
+    }
   }
+  return false;
 }
 
 /**

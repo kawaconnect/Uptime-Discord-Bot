@@ -56,9 +56,15 @@ When both are present for the same key, the DB setting wins.
   `/sg-setup repeat 0` disables).
 - If WordPress answers but has not checked its sites for over an hour (WP-Cron
   dead), a stale-data alert fires.
-- With Zammad configured (`ZAMMAD_BASE_URL` + `ZAMMAD_API_TOKEN`, or
-  `/sg-setup tickets`), one ticket is opened per incident and closed on
-  recovery; reminders add internal notes to it.
+- The bot also probes every known site itself (`SG_DIRECT_PROBE`, default on;
+  down after `SG_DIRECT_PROBE_FAILS` consecutive failures). This catches an
+  outage even when the SiteGuard endpoint or WP-Cron is what broke. Down/up is
+  announced once across both sources.
+- Helpdesk delivery: the alert email to the support mailbox is the ticket. If
+  SMTP is unconfigured or the relay rejects the message, the bot opens the
+  ticket directly through the Zammad API (`ZAMMAD_TICKET_MODE=fallback`,
+  default; `always` does both; `off` disables the API). Discord shows where the
+  ticket went, and shouts if neither path worked.
 
 ## Running with Docker
 

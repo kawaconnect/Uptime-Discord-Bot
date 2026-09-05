@@ -35,6 +35,7 @@ import { discordQueue } from "../queue/index.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 import {
   isTicketingConfigured,
+  ticketMode,
   openIncidentTicket,
   resolveIncidentTicket,
   noteIncidentTicket,
@@ -58,9 +59,32 @@ function isEmailEnabled(): boolean {
   return getSetting("SG_ALERT_EMAIL_ENABLED") !== "false";
 }
 
-/** Whether Zammad tickets are opened for SiteGuard incidents. Default: true when configured. */
+/** Whether Zammad API tickets may be opened for SiteGuard incidents. */
 function isTicketsEnabled(): boolean {
-  return getSetting("SG_ALERT_TICKETS_ENABLED") !== "false" && isTicketingConfigured();
+  return getSetting("SG_ALERT_TICKETS_ENABLED") !== "false" && isTicketingConfigured() && ticketMode() !== "off";
+}
+
+/**
+ * Deliver the incident to the helpdesk. The alert email to the support mailbox
+ * IS the ticket; if SMTP is unconfigured or the relay rejects the message, open
+ * the ticket through the Zammad API instead (mode "fallback"). Mode "always"
+ * does both. Returns a Discord line describing where the ticket went.
+ */
+async function deliverIncident(incidentKey: string, subject: string, html: string): Promise<string> {
+  const emailed = await maybeEmail(subject, html);
+  const mode = ticketMode();
+  const wantApi = isTicketsEnabled() && (mode === "always" || (mode === "fallback" && !emailed));
+  let line = "";
+  if (emailed) line += `\n**Ticket:** emailed to support`;
+  if (wantApi) {
+    const rec = await openIncidentTicket(incidentKey, subject, html);
+    if (rec) line += `\n**Ticket:** #${rec.number} - ${ticketUrl(rec.id)}${emailed ? "" : " (email failed; opened via API)"}`;
+    else if (!emailed) line += `\n\u26A0\uFE0F **Ticket could not be created** (email and API both failed - check SMTP relay and Zammad)`;
+  } else if (!emailed) {
+    line += isSmtpConfigured() ? `\n\u26A0\uFE0F **Alert email FAILED** - no ticket created` : `\n\u26A0\uFE0F **No SMTP configured** - no ticket created`;
+  }
+  if (!emailed) logger.error({ incidentKey, apiTicket: wantApi }, "Incident email not delivered");
+  return line;
 }
 
 /** Minutes between reminder alerts while an incident persists (0 = off). */
@@ -111,12 +135,14 @@ function mention(): string {
   return isMentionEnabled() ? "@everyone" : "";
 }
 
-/** Send email if SiteGuard email alerts are enabled. */
-function maybeEmail(subject: string, html: string): void {
-  if (isEmailEnabled() && isSmtpConfigured()) {
-    sendAlertEmail(subject, html).catch((err) =>
-      logger.error({ err }, "Failed to send SG alert email")
-    );
+/** Send email if SiteGuard email alerts are enabled. Resolves true only on success. */
+async function maybeEmail(subject: string, html: string): Promise<boolean> {
+  if (!isEmailEnabled() || !isSmtpConfigured()) return false;
+  try {
+    return await sendAlertEmail(subject, html);
+  } catch (err) {
+    logger.error({ err }, "Failed to send SG alert email");
+    return false;
   }
 }
 
@@ -248,7 +274,7 @@ async function runReminders(client: Client): Promise<void> {
         .setTimestamp(new Date());
       await post(client, embed, true);
       logger.warn({ downFor: dur }, "Sent SG unreachable REMINDER");
-      maybeEmail(`[STILL UNREACHABLE ${dur}] WordPress Health Endpoint`, `<h2>WordPress still unreachable (${dur})</h2><p>${siteguard.lastError}</p>`);
+      void maybeEmail(`[STILL UNREACHABLE ${dur}] WordPress Health Endpoint`, `<h2>WordPress still unreachable (${dur})</h2><p>${siteguard.lastError}</p>`);
       if (isTicketsEnabled()) {
         await noteIncidentTicket("sg:unreachable", `<p>Still unreachable after ${dur}. Last error: ${escapeHtml(siteguard.lastError)}</p>`);
       }
@@ -258,9 +284,10 @@ async function runReminders(client: Client): Promise<void> {
   // Sites down - one combined reminder
   if (downSites.size > 0) {
     // Refresh from the latest poll so response/error fields are current.
-    for (const s of siteguard.getDownSites()) downSites.set(s.site_id, s);
+    const currentlyDown = siteguard.getDownSites();
+    for (const s of currentlyDown) downSites.set(s.site_id, s);
     for (const id of [...downSites.keys()]) {
-      if (!siteguard.getDownSites().some((s) => s.site_id === id) && siteguard.reachable && siteguard.data) {
+      if (!currentlyDown.some((s) => s.site_id === id) && siteguard.data) {
         downSites.delete(id); // recovered without an event (e.g. restart) - drop it
       }
     }
@@ -280,7 +307,7 @@ async function runReminders(client: Client): Promise<void> {
     await post(client, embed, true);
     for (const id of downSites.keys()) lastSentAt.set(`site:${id}`, now);
     logger.warn({ count: downSites.size }, "Sent SG sites-down REMINDER");
-    maybeEmail(`[STILL DOWN] ${downSites.size} site(s)`, `<h2>${downSites.size} site(s) still down</h2><ul>${[...downSites.values()].map((s) => `<li>${escapeHtml(s.domain)} - ${escapeHtml(s.error || String(s.http_code))}</li>`).join("")}</ul>`);
+    void maybeEmail(`[STILL DOWN] ${downSites.size} site(s)`, `<h2>${downSites.size} site(s) still down</h2><ul>${[...downSites.values()].map((s) => `<li>${escapeHtml(s.domain)} - ${escapeHtml(s.error || String(s.http_code))}</li>`).join("")}</ul>`);
     if (isTicketsEnabled()) {
       for (const s of downSites.values()) {
         await noteIncidentTicket(`sg:site:${s.site_id}`, `<p>${escapeHtml(s.domain)} still down (${s.consecutive_failures ?? "?"} consecutive failures). Error: ${escapeHtml(s.error || String(s.http_code))}</p>`);
@@ -295,17 +322,9 @@ function escapeHtml(s: string): string {
 
 async function sendSiteDownAlert(client: Client, site: SgSite): Promise<void> {
   lastSentAt.set(`site:${site.site_id}`, Date.now());
+  const source = site.check_method === "bot-direct" ? "bot direct probe" : "SiteGuard (WordPress)";
 
-  let ticketLine = "";
-  if (isTicketsEnabled()) {
-    const rec = await openIncidentTicket(
-      `sg:site:${site.site_id}`,
-      `[DOWN] ${site.domain}`,
-      `<h2>${escapeHtml(site.domain)} is DOWN</h2><p><b>URL:</b> ${escapeHtml(site.url)}</p><p><b>HTTP Code:</b> ${site.http_code || "N/A"}</p><p><b>Error:</b> ${escapeHtml(site.error || "No response")}</p><p><b>Consecutive Failures:</b> ${site.consecutive_failures ?? 1}</p><p>Opened automatically by the uptime bot.</p>`
-    );
-    if (rec) ticketLine = `\n**Ticket:** #${rec.number} - ${ticketUrl(rec.id)}`;
-  }
-
+  // Discord first - it is the fastest path - then helpdesk (email → API fallback).
   const embed = new EmbedBuilder()
     .setTitle(`${sgStatusEmoji("down")} ${site.domain} is DOWN`)
     .setDescription(
@@ -314,19 +333,24 @@ async function sendSiteDownAlert(client: Client, site: SgSite): Promise<void> {
       `**Error:** ${site.error || "No response"}\n` +
       `**Response Time:** ${Math.round((site.response_time || 0) * 1000)}ms\n` +
       `**Consecutive Failures:** ${site.consecutive_failures ?? 1}\n` +
-      `**Detected:** <t:${site.last_check || Math.floor(Date.now() / 1000)}:R>` +
-      ticketLine
+      `**Detected by:** ${source}\n` +
+      `**Detected:** <t:${site.last_check || Math.floor(Date.now() / 1000)}:R>`
     )
     .setColor(0xe74c3c)
     .setTimestamp(new Date((site.last_check || Math.floor(Date.now() / 1000)) * 1000));
 
   const sent = await post(client, embed, true);
-  logger.warn({ domain: site.domain, error: site.error, sent }, "SG site DOWN alert");
+  logger.warn({ domain: site.domain, error: site.error, sent, source }, "SG site DOWN alert");
 
-  maybeEmail(
+  const ticketLine = await deliverIncident(
+    `sg:site:${site.site_id}`,
     `[DOWN] ${site.domain}`,
-    `<h2>${escapeHtml(site.domain)} is DOWN</h2><p><b>URL:</b> ${escapeHtml(site.url)}</p><p><b>HTTP Code:</b> ${site.http_code || "N/A"}</p><p><b>Error:</b> ${escapeHtml(site.error || "No response")}</p><p><b>Consecutive Failures:</b> ${site.consecutive_failures ?? 1}</p>`
+    `<h2>${escapeHtml(site.domain)} is DOWN</h2><p><b>URL:</b> ${escapeHtml(site.url)}</p><p><b>HTTP Code:</b> ${site.http_code || "N/A"}</p><p><b>Error:</b> ${escapeHtml(site.error || "No response")}</p><p><b>Consecutive Failures:</b> ${site.consecutive_failures ?? 1}</p><p><b>Detected by:</b> ${source}</p><p>Opened automatically by the uptime bot.</p>`
   );
+  if (ticketLine) {
+    const follow = new EmbedBuilder().setDescription(`${site.domain}: ${ticketLine.trim()}`).setColor(ticketLine.includes("\u26A0") ? 0xe67e22 : 0x95a5a6);
+    await post(client, follow, ticketLine.includes("\u26A0"));
+  }
 }
 
 async function sendSiteRecoveryAlert(client: Client, site: SgSite): Promise<void> {
@@ -354,7 +378,7 @@ async function sendSiteRecoveryAlert(client: Client, site: SgSite): Promise<void
   await post(client, embed, false);
   logger.info({ domain: site.domain }, "Sent SG recovery alert");
 
-  maybeEmail(
+  void maybeEmail(
     `[RECOVERED] ${site.domain}`,
     `<h2>${escapeHtml(site.domain)} is back UP</h2><p><b>Response Time:</b> ${Math.round((site.response_time || 0) * 1000)}ms</p>`
   );
@@ -375,7 +399,7 @@ async function sendSslExpiringAlert(client: Client, site: SgSite): Promise<void>
   await post(client, embed, false);
   logger.warn({ domain: site.domain, daysLeft: site.ssl_expiry_days }, "Sent SG SSL expiring alert");
 
-  maybeEmail(
+  void maybeEmail(
     `[SSL EXPIRING] ${site.domain} - ${site.ssl_expiry_days} days left`,
     `<h2>SSL Certificate Expiring - ${escapeHtml(site.domain)}</h2><p><b>Days Remaining:</b> ${site.ssl_expiry_days}</p><p><b>Issuer:</b> ${escapeHtml(site.ssl_issuer || "Unknown")}</p><p>Renew the certificate before it expires.</p>`
   );
@@ -383,16 +407,7 @@ async function sendSslExpiringAlert(client: Client, site: SgSite): Promise<void>
 
 async function sendUnreachableAlert(client: Client, errorMsg: string): Promise<void> {
   lastSentAt.set("unreachable", Date.now());
-
-  let ticketLine = "";
-  if (isTicketsEnabled()) {
-    const rec = await openIncidentTicket(
-      "sg:unreachable",
-      "[UNREACHABLE] WordPress health endpoint (SiteGuard)",
-      `<h2>WordPress unreachable</h2><p>The SiteGuard health endpoint at ${escapeHtml(siteguard.getUrl() ?? "")} cannot be reached.</p><p><b>Error:</b> ${escapeHtml(errorMsg)}</p><p>All site health data is stale; outages may be going undetected. Opened automatically by the uptime bot.</p>`
-    );
-    if (rec) ticketLine = `\n**Ticket:** #${rec.number} - ${ticketUrl(rec.id)}`;
-  }
+  const ticketLine = "";
 
   const embed = new EmbedBuilder()
     .setTitle("\u{1F6A8} WORDPRESS UNREACHABLE")
@@ -410,10 +425,15 @@ async function sendUnreachableAlert(client: Client, errorMsg: string): Promise<v
   const sent = await post(client, embed, true);
   logger.warn({ error: errorMsg, sent }, "SG WordPress unreachable alert");
 
-  maybeEmail(
-    "[UNREACHABLE] WordPress Health Endpoint",
-    `<h2>WordPress Unreachable</h2><p><b>Error:</b> ${escapeHtml(errorMsg)}</p><p>All site health data is stale.</p>`
+  const ticketLine2 = await deliverIncident(
+    "sg:unreachable",
+    "[UNREACHABLE] WordPress health endpoint (SiteGuard)",
+    `<h2>WordPress Unreachable</h2><p>The SiteGuard health endpoint at ${escapeHtml(siteguard.getUrl() ?? "")} cannot be reached.</p><p><b>Error:</b> ${escapeHtml(errorMsg)}</p><p>All site health data is stale; outages may be going undetected. Opened automatically by the uptime bot.</p>`
   );
+  if (ticketLine2) {
+    const follow = new EmbedBuilder().setDescription(`WordPress unreachable: ${ticketLine2.trim()}`).setColor(ticketLine2.includes("\u26A0") ? 0xe67e22 : 0x95a5a6);
+    await post(client, follow, ticketLine2.includes("\u26A0"));
+  }
 }
 
 async function sendReachableAlert(client: Client): Promise<void> {
@@ -443,7 +463,7 @@ async function sendReachableAlert(client: Client): Promise<void> {
   await post(client, embed, summary.down > 0);
   logger.info("Sent SG WordPress reachable alert");
 
-  maybeEmail(
+  void maybeEmail(
     "[RESTORED] WordPress Health Endpoint",
     `<h2>WordPress Connection Restored</h2><p>Status: ${summary.operational}/${summary.total} sites operational</p>`
   );
@@ -464,7 +484,7 @@ async function sendDataStaleAlert(client: Client, ageSec: number): Promise<void>
 
   await post(client, embed, true);
   logger.warn({ ageSec }, "Sent SG stale-data alert");
-  maybeEmail("[STALE] SiteGuard health data", `<h2>SiteGuard health data stale (${age})</h2><p>WP-Cron may be dead; site outages are not being detected.</p>`);
+  void maybeEmail("[STALE] SiteGuard health data", `<h2>SiteGuard health data stale (${age})</h2><p>WP-Cron may be dead; site outages are not being detected.</p>`);
 }
 
 async function sendDataFreshAlert(client: Client): Promise<void> {

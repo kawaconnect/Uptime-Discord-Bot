@@ -54,6 +54,16 @@ export function isTicketingConfigured(): boolean {
   return getTicketConfig() !== null;
 }
 
+/**
+ * When to open API tickets: "fallback" (default) only when the alert email -
+ * which itself opens a ticket via the support mailbox - could not be sent;
+ * "always" on every incident; "off" never.
+ */
+export function ticketMode(): "fallback" | "always" | "off" {
+  const m = (getSettingOrEnv("ZAMMAD_TICKET_MODE") ?? "fallback").toLowerCase();
+  return m === "always" || m === "off" ? m : "fallback";
+}
+
 interface OpenTicketRecord {
   id: number;
   number: string;

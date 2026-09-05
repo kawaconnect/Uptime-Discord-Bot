@@ -98,6 +98,13 @@ class SiteGuardClient extends EventEmitter {
   private _lastError = "";
   private _staleAlerted = false;
   private _statusesLoaded = false;
+  /** Sites the bot's own direct HTTP probe currently considers down. */
+  private _directDown = new Map<number, SgSite>();
+  private _directFailures = new Map<number, number>();
+  private _probeTimer: ReturnType<typeof setInterval> | null = null;
+  private _probing = false;
+  /** Known sites (persisted) so direct probes work even while SiteGuard is unreachable. */
+  private _knownSites: Array<{ site_id: number; url: string; domain: string }> = [];
 
   get data(): SgHealthResponse | null { return this._data; }
   get reachable(): boolean { return this._reachable; }
@@ -132,6 +139,19 @@ class SiteGuardClient extends EventEmitter {
     this._pollTimer = setInterval(() => {
       this.poll().catch((err) => logger.error({ err }, "SiteGuard poll failed"));
     }, pollMs);
+
+    // Independent per-site probes: the bot fetches every known site itself, so
+    // an outage is caught even when the SiteGuard endpoint (or WP-Cron) is the
+    // thing that is broken. Offset by half the interval from the poll.
+    if (this.directProbeEnabled()) {
+      this.loadKnownSites();
+      setTimeout(() => {
+        this.directProbeAll().catch((err) => logger.error({ err }, "Direct site probe failed"));
+        this._probeTimer = setInterval(() => {
+          this.directProbeAll().catch((err) => logger.error({ err }, "Direct site probe failed"));
+        }, pollMs);
+      }, Math.min(pollMs / 2, 30_000));
+    }
   }
 
   stop(): void {
@@ -139,7 +159,140 @@ class SiteGuardClient extends EventEmitter {
       clearInterval(this._pollTimer);
       this._pollTimer = null;
     }
+    if (this._probeTimer) {
+      clearInterval(this._probeTimer);
+      this._probeTimer = null;
+    }
     logger.info("SiteGuard health monitor stopped");
+  }
+
+  private directProbeEnabled(): boolean {
+    const v = getSetting("SG_DIRECT_PROBE") ?? env().SG_DIRECT_PROBE ?? "true";
+    return String(v).toLowerCase() !== "false";
+  }
+
+  private directProbeThreshold(): number {
+    const n = parseInt(getSetting("SG_DIRECT_PROBE_FAILS") ?? String(env().SG_DIRECT_PROBE_FAILS ?? 2), 10);
+    return Number.isFinite(n) && n >= 1 ? n : 2;
+  }
+
+  private loadKnownSites(): void {
+    try {
+      const raw = getSetting("SG_KNOWN_SITES");
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this._knownSites = parsed.filter((s) => s && typeof s.url === "string" && Number.isFinite(Number(s.site_id)))
+            .map((s) => ({ site_id: Number(s.site_id), url: String(s.url), domain: String(s.domain ?? "") }));
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, "Could not load known SiteGuard sites");
+    }
+  }
+
+  private saveKnownSites(sites: SgSite[]): void {
+    this._knownSites = sites.map((s) => ({ site_id: s.site_id, url: s.url, domain: s.domain }));
+    try { setSetting("SG_KNOWN_SITES", JSON.stringify(this._knownSites)); } catch { /* non-fatal */ }
+  }
+
+  /** Is the site currently down according to EITHER source? */
+  private isDown(siteId: number): boolean {
+    return this._previousStatuses.get(siteId) === "down" || this._directDown.has(siteId);
+  }
+
+  /**
+   * Fetch every known site directly. A site is declared down after
+   * `directProbeThreshold()` consecutive failures (network error, timeout, or
+   * HTTP 5xx). Any response below 500 - including 401/403 from a WAF or
+   * maintenance 503? no, 503 is down - counts as up: the server is serving.
+   */
+  async directProbeAll(): Promise<void> {
+    if (this._probing || this._knownSites.length === 0) return;
+    this._probing = true;
+    const threshold = this.directProbeThreshold();
+    try {
+      const queue = [...this._knownSites];
+      const workers = Array.from({ length: Math.min(5, queue.length) }, async () => {
+        while (queue.length) {
+          const site = queue.shift()!;
+          const result = await this.probeOne(site.url);
+          const wasDown = this.isDown(site.site_id);
+          if (result.ok) {
+            this._directFailures.delete(site.site_id);
+            if (this._directDown.has(site.site_id)) {
+              this._directDown.delete(site.site_id);
+              logger.info({ domain: site.domain, code: result.code }, "Direct probe: site responding again");
+            }
+            if (wasDown && !this.isDown(site.site_id)) {
+              this.emit("siteRecovery", this.syntheticSite(site, "operational", result));
+            }
+          } else {
+            const fails = (this._directFailures.get(site.site_id) ?? 0) + 1;
+            this._directFailures.set(site.site_id, fails);
+            if (fails >= threshold && !this._directDown.has(site.site_id)) {
+              const synthetic = this.syntheticSite(site, "down", result, fails);
+              this._directDown.set(site.site_id, synthetic);
+              logger.error({ domain: site.domain, error: result.error, code: result.code, fails }, "Direct probe: site DOWN");
+              if (!wasDown) this.emit("siteDown", synthetic);
+            } else if (fails < threshold) {
+              logger.warn({ domain: site.domain, error: result.error, code: result.code, fails, threshold }, "Direct probe failed (not yet at threshold)");
+            } else if (this._directDown.has(site.site_id)) {
+              this._directDown.get(site.site_id)!.consecutive_failures = fails;
+            }
+          }
+        }
+      });
+      await Promise.all(workers);
+    } finally {
+      this._probing = false;
+    }
+  }
+
+  private async probeOne(url: string): Promise<{ ok: boolean; code: number; error: string; ms: number }> {
+    const started = Date.now();
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20_000);
+    try {
+      const res = await fetch(url, {
+        method: "GET",
+        redirect: "follow",
+        signal: controller.signal,
+        headers: { "User-Agent": "UptimeKuma-Discord-Bot/direct-probe", Accept: "text/html,*/*" },
+      });
+      clearTimeout(timeout);
+      // Drain a little of the body so the connection is reused/closed cleanly.
+      try { await res.body?.cancel(); } catch { /* ignore */ }
+      const ok = res.status < 500;
+      return { ok, code: res.status, error: ok ? "" : `HTTP ${res.status}`, ms: Date.now() - started };
+    } catch (err) {
+      clearTimeout(timeout);
+      const msg = err instanceof Error ? (err.name === "AbortError" ? "Timeout after 20s" : err.message) : String(err);
+      return { ok: false, code: 0, error: msg, ms: Date.now() - started };
+    }
+  }
+
+  private syntheticSite(site: { site_id: number; url: string; domain: string }, status: SgSite["status"], r: { code: number; error: string; ms: number }, fails = 0): SgSite {
+    const known = this._data?.sites.find((s) => s.site_id === site.site_id);
+    return {
+      site_id: site.site_id,
+      url: site.url,
+      domain: site.domain,
+      status,
+      http_code: r.code,
+      response_time: r.ms / 1000,
+      ssl_expiry_days: known?.ssl_expiry_days ?? -1,
+      ssl_issuer: known?.ssl_issuer ?? "",
+      last_check: Math.floor(Date.now() / 1000),
+      error: r.error,
+      consecutive_failures: fails,
+      check_method: "bot-direct",
+    };
+  }
+
+  /** Sites down according to the bot's own probes (for the status board / reminders). */
+  getDirectDownSites(): SgSite[] {
+    return [...this._directDown.values()];
   }
 
   /** Restart polling (used after config change via slash command). */
@@ -153,6 +306,8 @@ class SiteGuardClient extends EventEmitter {
     this._unreachableSince = 0;
     this._firstPoll = true;
     this._staleAlerted = false;
+    this._directDown.clear();
+    this._directFailures.clear();
     if (this.isConfigured) {
       this.start();
     }
@@ -256,17 +411,21 @@ class SiteGuardClient extends EventEmitter {
       const sslWarnDays = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14;
       this.loadPersistedStatuses();
 
-      for (const site of data.sites) {
-        const prev = this._previousStatuses.get(site.site_id);
+      this.saveKnownSites(data.sites);
 
+      for (const site of data.sites) {
         // Status change detection. On the first poll the previous state comes
         // from the persisted map; a site that is down with no prior record (or a
         // prior non-down record) is a real outage and MUST alert - the old
         // `!this._firstPoll` guard swallowed every outage that started while the
-        // bot was restarting or before it was connected.
-        if (site.status === "down" && prev !== "down") {
+        // bot was restarting or before it was connected. Down/up is announced
+        // once across both sources (SiteGuard + the bot's direct probe).
+        const wasDown = this.isDown(site.site_id);
+        this._previousStatuses.set(site.site_id, site.status);
+        const nowDown = this.isDown(site.site_id);
+        if (!wasDown && nowDown) {
           this.emit("siteDown", site);
-        } else if (site.status !== "down" && prev === "down") {
+        } else if (wasDown && !nowDown) {
           this.emit("siteRecovery", site);
         }
 
@@ -283,7 +442,6 @@ class SiteGuardClient extends EventEmitter {
           this._sslAlerted.delete(site.site_id);
         }
 
-        this._previousStatuses.set(site.site_id, site.status);
       }
       this.persistStatuses();
 
@@ -362,7 +520,10 @@ class SiteGuardClient extends EventEmitter {
   }
 
   getDownSites(): SgSite[] {
-    return this.sites.filter((s) => s.status === "down");
+    const byId = new Map<number, SgSite>();
+    for (const s of this.sites) if (s.status === "down") byId.set(s.site_id, s);
+    for (const s of this._directDown.values()) if (!byId.has(s.site_id)) byId.set(s.site_id, s);
+    return [...byId.values()];
   }
 
   getSslExpiring(): SgSite[] {
