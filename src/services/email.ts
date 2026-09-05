@@ -59,10 +59,21 @@ export function configureSmtp(): void {
     return;
   }
 
-  const opts: nodemailer.TransportOptions & { host: string; port: number; secure: boolean; auth?: { user: string; pass: string } } = {
+  // Certificate verification. An in-cluster relay (*.svc.cluster.local) speaks
+  // STARTTLS with a self-signed certificate; rejecting it silently killed every
+  // alert email ("self-signed certificate" ESOCKET). Default: verify for public
+  // hosts, accept self-signed for cluster-internal hosts. Override with
+  // SMTP_TLS_REJECT_UNAUTHORIZED=true|false.
+  const rejectSetting = getSetting("SMTP_TLS_REJECT_UNAUTHORIZED") ?? process.env.SMTP_TLS_REJECT_UNAUTHORIZED;
+  const internalHost = /\.svc(\.cluster\.local)?\.?$|^localhost$|^127\./i.test(config.host);
+  const rejectUnauthorized = rejectSetting !== undefined ? rejectSetting !== "false" : !internalHost;
+
+  const opts: nodemailer.TransportOptions & { host: string; port: number; secure: boolean; auth?: { user: string; pass: string }; tls?: { rejectUnauthorized: boolean }; connectionTimeout?: number } = {
     host: config.host,
     port: config.port,
     secure: config.secure,
+    tls: { rejectUnauthorized },
+    connectionTimeout: 20_000,
   };
 
   // Only add auth if credentials are provided (relay mode skips auth)
@@ -72,7 +83,7 @@ export function configureSmtp(): void {
 
   transporter = nodemailer.createTransport(opts as any);
   currentConfig = config;
-  logger.info({ host: config.host, port: config.port, from: config.from, to: config.to, auth: !!config.user }, "SMTP configured");
+  logger.info({ host: config.host, port: config.port, from: config.from, to: config.to, auth: !!config.user, rejectUnauthorized }, "SMTP configured");
 }
 
 export function isSmtpConfigured(): boolean {
