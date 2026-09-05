@@ -14,6 +14,7 @@ import { setSetting, deleteSetting, getSetting } from "../db/index.js";
 import { env } from "../util/env.js";
 import { siteguard } from "../services/siteguard.js";
 import { startSgAlerts } from "../services/sgAlerts.js";
+import { getTicketConfig, testTicketing } from "../services/tickets.js";
 
 function isAdmin(userId: string): boolean {
   const ids = env().ADMIN_USER_IDS;
@@ -43,6 +44,9 @@ export const sgSetupCommand = new SlashCommandBuilder()
             { name: "Site recovery", value: "site_recovery" },
             { name: "SSL expiring", value: "ssl_expiring" },
             { name: "WordPress unreachable", value: "wp_unreachable" },
+            { name: "Health data stale (WP cron dead)", value: "data_stale" },
+            { name: "Repeat reminders while down/unreachable", value: "repeat" },
+            { name: "Zammad tickets for incidents", value: "tickets" },
             { name: "@everyone mentions for SG alerts (default: on)", value: "sg_mention" },
             { name: "Email alerts for SG (default: on)", value: "sg_email" },
           )
@@ -71,6 +75,21 @@ export const sgSetupCommand = new SlashCommandBuilder()
   )
   .addSubcommand((sc) =>
     sc.setName("disconnect").setDescription("Disconnect from the SiteGuard health endpoint")
+  )
+  .addSubcommand((sc) =>
+    sc
+      .setName("tickets")
+      .setDescription("Configure Zammad ticket creation for incidents (site down / WordPress unreachable)")
+      .addStringOption((o) => o.setName("url").setDescription("Zammad base URL (e.g. https://help.example.com)").setRequired(true))
+      .addStringOption((o) => o.setName("token").setDescription("Zammad API token (ticket.agent permission)").setRequired(true))
+      .addStringOption((o) => o.setName("group").setDescription("Zammad group for new tickets (default: Users)"))
+      .addStringOption((o) => o.setName("customer").setDescription("Customer email to file tickets under"))
+  )
+  .addSubcommand((sc) =>
+    sc
+      .setName("repeat")
+      .setDescription("Minutes between reminder alerts while a site stays down / WordPress stays unreachable (0 = off)")
+      .addIntegerOption((o) => o.setName("minutes").setDescription("Reminder interval in minutes (default 30)").setRequired(true).setMinValue(0).setMaxValue(1440))
   );
 
 export async function handleSgSetupCommand(
@@ -90,6 +109,8 @@ export async function handleSgSetupCommand(
       case "show": return await handleSgShowSetup(interaction);
       case "connect": return await handleSgConnect(interaction);
       case "disconnect": return await handleSgDisconnect(interaction);
+      case "tickets": return await handleSgTickets(interaction);
+      case "repeat": return await handleSgRepeat(interaction);
       default:
         await interaction.reply({ content: "Unknown subcommand.", ephemeral: true });
     }
@@ -144,6 +165,12 @@ async function handleSgAlertsToggle(interaction: ChatInputCommandInteraction) {
     return;
   }
 
+  if (type === "tickets") {
+    if (state === "on") deleteSetting("TICKETS_ENABLED"); else setSetting("TICKETS_ENABLED", "false");
+    await interaction.reply({ content: state === "on" ? "\u2705 Zammad ticket creation **enabled** (when Zammad is configured)." : "\u274C Zammad ticket creation **disabled**.", ephemeral: true });
+    return;
+  }
+
   // Standard SiteGuard alert toggles (default: ON)
   const key = `SG_ALERT_${type.toUpperCase()}_ENABLED`;
 
@@ -169,6 +196,9 @@ async function handleSgShowSetup(interaction: ChatInputCommandInteraction) {
   const emailEnabled = getSetting("SG_ALERT_EMAIL_ENABLED") !== "false";
 
   const summary = siteguard.data ? siteguard.getSummary() : null;
+  const statusChannel = getSetting("STATUS_CHANNEL_ID");
+  const ticketCfg = getTicketConfig();
+  const repeatMin = parseInt(getSetting("SG_ALERT_REPEAT_MIN") ?? String(config.SG_ALERT_REPEAT_MIN ?? 30), 10);
 
   const lines = [
     "**SiteGuard Health Monitor Configuration:**",
@@ -179,7 +209,9 @@ async function handleSgShowSetup(interaction: ChatInputCommandInteraction) {
     siteguard.data ? `**SiteGuard Version:** ${siteguard.data.version}` : "",
     `**Poll Interval:** ${(config.SG_HEALTH_POLL_MS ?? 60000) / 1000}s`,
     "",
-    `**Alert Channel:** ${alertChannel ? `<#${alertChannel}>` : "*not set - use `/sg-setup alerts`*"}`,
+    `**Alert Channel:** ${alertChannel ? `<#${alertChannel}>` : (statusChannel ? `*not set - falling back to status channel <#${statusChannel}>* (use \`/sg-setup alerts\`)` : "\u{1F6A8} **NOT SET and no status channel - alerts cannot be delivered!** Use `/sg-setup alerts`")}`,
+    `**Reminders while down:** ${repeatMin > 0 ? `every ${repeatMin} min` : "off"}`,
+    `**Zammad tickets:** ${ticketCfg ? `\u2705 ${ticketCfg.baseUrl} (group ${ticketCfg.group})` : "\u26AA not configured - use `/sg-setup tickets`"}`,
     "",
     "**Alert Types:**",
     `  Site down: ${siteDownEnabled ? "\u2705 enabled" : "\u274C disabled"}`,
@@ -241,13 +273,10 @@ async function handleSgConnect(interaction: ChatInputCommandInteraction) {
       const siteCount = data.sites?.length ?? 0;
       const version = data.version ?? "unknown";
 
-      // Start or restart the monitor
+      // Start alert service first (idempotent), then start/restart the monitor,
+      // so even a failing first poll is alerted.
+      startSgAlerts(interaction.client);
       siteguard.restart();
-
-      // Start alert service if not already running (first-time connect via slash command)
-      siteguard.once("updated", () => {
-        startSgAlerts(interaction.client);
-      });
 
       await interaction.editReply(
         `\u2705 **Connected to SiteGuard!**\n\n` +
@@ -264,14 +293,52 @@ async function handleSgConnect(interaction: ChatInputCommandInteraction) {
       `\u26A0\uFE0F Could not reach the endpoint: ${msg}\n\n` +
       `Config saved anyway - the bot will retry polling. Make sure the WordPress site is accessible from this server.`
     );
-    // Still restart with saved config
+    // Still restart with saved config; alerts are attached first so the
+    // ongoing unreachability is announced.
+    startSgAlerts(interaction.client);
     siteguard.restart();
-    siteguard.once("updated", () => {
-      startSgAlerts(interaction.client);
-    });
   }
 
   logger.info({ url }, "SG health endpoint configured via slash command");
+}
+
+async function handleSgTickets(interaction: ChatInputCommandInteraction) {
+  const url = interaction.options.getString("url", true).trim().replace(/\/+$/, "");
+  const token = interaction.options.getString("token", true).trim();
+  const group = interaction.options.getString("group")?.trim();
+  const customer = interaction.options.getString("customer")?.trim();
+
+  try {
+    const parsed = new URL(url);
+    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("bad protocol");
+  } catch {
+    await interaction.reply({ content: "Invalid Zammad URL.", ephemeral: true });
+    return;
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+  setSetting("ZAMMAD_BASE_URL", url);
+  setSetting("ZAMMAD_API_TOKEN", token);
+  if (group) setSetting("ZAMMAD_TICKET_GROUP", group); else deleteSetting("ZAMMAD_TICKET_GROUP");
+  if (customer) setSetting("ZAMMAD_TICKET_CUSTOMER", customer); else deleteSetting("ZAMMAD_TICKET_CUSTOMER");
+  deleteSetting("TICKETS_ENABLED");
+
+  const test = await testTicketing();
+  await interaction.editReply(test.ok
+    ? `\u2705 **Zammad ticketing configured.** ${test.message}\n\nA ticket is opened when a site goes down or WordPress becomes unreachable, and closed on recovery.`
+    : `\u26A0\uFE0F Settings saved but the Zammad test failed: ${test.message}\n\nCheck the URL and token; tickets will be attempted anyway.`);
+  logger.info({ url, group: group ?? "Users" }, "Zammad ticketing configured via slash command");
+}
+
+async function handleSgRepeat(interaction: ChatInputCommandInteraction) {
+  const minutes = interaction.options.getInteger("minutes", true);
+  setSetting("SG_ALERT_REPEAT_MIN", String(minutes));
+  await interaction.reply({
+    content: minutes > 0
+      ? `\u2705 Reminder alerts every **${minutes} min** while a site stays down or WordPress stays unreachable.`
+      : "\u274C Reminder alerts disabled (a single alert per incident).",
+    ephemeral: true,
+  });
 }
 
 async function handleSgDisconnect(interaction: ChatInputCommandInteraction) {

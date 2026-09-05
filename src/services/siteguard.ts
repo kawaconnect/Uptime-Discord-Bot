@@ -9,7 +9,7 @@
 import { EventEmitter } from "node:events";
 import { env } from "../util/env.js";
 import { logger } from "../util/logger.js";
-import { getSetting } from "../db/index.js";
+import { getSetting, setSetting } from "../db/index.js";
 
 // ---------------------------------------------------------------
 // Types
@@ -94,9 +94,16 @@ class SiteGuardClient extends EventEmitter {
   private _sslAlerted = new Set<number>();
   private _firstPoll = true;
   private _lastForceCheckAt = 0;
+  private _unreachableSince = 0;
+  private _lastError = "";
+  private _staleAlerted = false;
+  private _statusesLoaded = false;
 
   get data(): SgHealthResponse | null { return this._data; }
   get reachable(): boolean { return this._reachable; }
+  /** Epoch ms when the endpoint became unreachable (0 when reachable). */
+  get unreachableSince(): number { return this._unreachableSince; }
+  get lastError(): string { return this._lastError; }
   get sites(): SgSite[] { return this._data?.sites ?? []; }
   get isConfigured(): boolean { return !!this.getUrl(); }
   get dataStale(): boolean {
@@ -140,11 +147,46 @@ class SiteGuardClient extends EventEmitter {
     this.stop();
     this._data = null;
     this._previousStatuses.clear();
+    this._statusesLoaded = false;
     this._sslAlerted.clear();
     this._reachable = true;
+    this._unreachableSince = 0;
     this._firstPoll = true;
+    this._staleAlerted = false;
     if (this.isConfigured) {
       this.start();
+    }
+  }
+
+  /**
+   * Last-known per-site statuses survive restarts (settings table). Without
+   * this, a restart while a site was down lost the "previous" state and the
+   * first poll could never emit siteDown for it - the outage went unannounced
+   * until the next transition.
+   */
+  private loadPersistedStatuses(): void {
+    if (this._statusesLoaded) return;
+    this._statusesLoaded = true;
+    try {
+      const raw = getSetting("SG_LAST_STATUSES");
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Record<string, string>;
+      for (const [id, status] of Object.entries(parsed)) {
+        const n = Number(id);
+        if (Number.isFinite(n) && typeof status === "string") this._previousStatuses.set(n, status);
+      }
+    } catch (err) {
+      logger.warn({ err }, "Could not load persisted SiteGuard statuses");
+    }
+  }
+
+  private persistStatuses(): void {
+    try {
+      const obj: Record<string, string> = {};
+      for (const [id, status] of this._previousStatuses) obj[String(id)] = status;
+      setSetting("SG_LAST_STATUSES", JSON.stringify(obj));
+    } catch (err) {
+      logger.warn({ err }, "Could not persist SiteGuard statuses");
     }
   }
 
@@ -172,6 +214,9 @@ class SiteGuardClient extends EventEmitter {
       }
 
       const data = await response.json() as SgHealthResponse;
+      if (!data || !Array.isArray(data.sites)) {
+        throw new Error("Health endpoint returned an unexpected payload (no sites array)");
+      }
       this._data = data;
 
       // If the health data is stale (WordPress cron stopped), trigger a force check via POST.
@@ -186,27 +231,43 @@ class SiteGuardClient extends EventEmitter {
           logger.warn({ err }, "SiteGuard force check failed")
         );
       }
+      // Stale-data alerting: the endpoint answers but WordPress has not actually
+      // checked its sites for a long time (cron dead). Sites could be down with
+      // nobody noticing, so this is alert-worthy - once, plus a recovery notice.
+      const staleForAlert = dataAge > 2 * SG_STALE_THRESHOLD_SEC;
+      if (staleForAlert && !this._staleAlerted) {
+        this._staleAlerted = true;
+        this.emit("dataStale", Math.floor(dataAge));
+      } else if (!staleForAlert && this._staleAlerted) {
+        this._staleAlerted = false;
+        this.emit("dataFresh");
+      }
 
       // Reachability state change
       if (!this._reachable) {
         this._reachable = true;
+        this._unreachableSince = 0;
+        this._lastError = "";
         this.emit("reachable");
         logger.info("SiteGuard WordPress endpoint is reachable again");
       }
 
       // Compare per-site statuses for change detection
       const sslWarnDays = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14;
+      this.loadPersistedStatuses();
 
       for (const site of data.sites) {
         const prev = this._previousStatuses.get(site.site_id);
 
-        if (!this._firstPoll && prev !== undefined) {
-          // Status change detection
-          if (site.status === "down" && prev !== "down") {
-            this.emit("siteDown", site);
-          } else if (site.status !== "down" && prev === "down") {
-            this.emit("siteRecovery", site);
-          }
+        // Status change detection. On the first poll the previous state comes
+        // from the persisted map; a site that is down with no prior record (or a
+        // prior non-down record) is a real outage and MUST alert - the old
+        // `!this._firstPoll` guard swallowed every outage that started while the
+        // bot was restarting or before it was connected.
+        if (site.status === "down" && prev !== "down") {
+          this.emit("siteDown", site);
+        } else if (site.status !== "down" && prev === "down") {
+          this.emit("siteRecovery", site);
         }
 
         // SSL expiry alerts (only once per site until it renews)
@@ -224,6 +285,7 @@ class SiteGuardClient extends EventEmitter {
 
         this._previousStatuses.set(site.site_id, site.status);
       }
+      this.persistStatuses();
 
       this._firstPoll = false;
       this.emit("updated", data);
@@ -233,12 +295,14 @@ class SiteGuardClient extends EventEmitter {
         "SiteGuard poll successful"
       );
     } catch (err) {
+      this._lastError = err instanceof Error ? err.message : String(err);
       if (this._reachable) {
         this._reachable = false;
-        this.emit("unreachable", err instanceof Error ? err.message : String(err));
+        this._unreachableSince = Date.now();
+        this.emit("unreachable", this._lastError);
         logger.error({ err }, "SiteGuard WordPress endpoint unreachable");
       } else {
-        logger.debug({ err }, "SiteGuard still unreachable");
+        logger.warn({ err: this._lastError, downForSec: Math.floor((Date.now() - this._unreachableSince) / 1000) }, "SiteGuard still unreachable");
       }
     }
   }

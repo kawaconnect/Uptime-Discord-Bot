@@ -23,7 +23,7 @@ import {
   refreshCommand,
 } from "./commands/status.js";
 import { siteguard } from "./services/siteguard.js";
-import { startSgAlerts } from "./services/sgAlerts.js";
+import { startSgAlerts, stopSgAlerts } from "./services/sgAlerts.js";
 import { sgSetupCommand } from "./commands/sg-setup.js";
 import {
   sgStatusCommand,
@@ -116,14 +116,16 @@ async function main() {
   });
 
   // SiteGuard Health Monitor (independent from Kuma)
-  // Starts if configured via env vars OR via /sg-setup connect slash command (DB settings)
+  // Alert listeners are attached BEFORE the first poll and regardless of its
+  // outcome. They used to be wired on the first successful "updated" event, so
+  // when WordPress was already unreachable at startup (the exact moment an
+  // alert matters most) the "unreachable" event fired into the void.
+  startSgAlerts(client);
   if (siteguard.isConfigured) {
     logger.info({ url: siteguard.getUrl() }, "Starting SiteGuard health monitor");
     siteguard.start();
-
-    siteguard.once("updated", () => {
-      startSgAlerts(client);
-    });
+  } else {
+    logger.warn("SiteGuard health monitor not configured - use /sg-setup connect <url> <api_key>");
   }
 
   logger.info("Bot started - waiting for Uptime Kuma connection");
@@ -136,6 +138,7 @@ async function main() {
 async function shutdown(signal: string) {
   logger.info({ signal }, "Shutting down");
   siteguard.stop();
+  stopSgAlerts();
   stopStatusBoard();
   stopPresence();
   kuma.disconnect();

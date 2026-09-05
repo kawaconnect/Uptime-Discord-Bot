@@ -41,6 +41,25 @@ Config comes from two layers, and **the runtime layer overrides the environment*
 
 When both are present for the same key, the DB setting wins.
 
+## Alert delivery guarantees
+
+- SiteGuard alert listeners attach at startup, before the first poll. A bot
+  that starts (or reconnects) while WordPress is already unreachable announces
+  it immediately.
+- If no SiteGuard alert channel is set (`/sg-setup alerts`), alerts fall back
+  to the Kuma alert channel, then to the status-board channel. Nothing is
+  dropped for lack of configuration; a missing channel is logged at error level.
+- Per-site states are persisted, so a site that is down when the bot restarts
+  still triggers a DOWN alert (once), and recovery is announced.
+- While a site stays down or WordPress stays unreachable, a reminder with
+  `@everyone` repeats every `SG_ALERT_REPEAT_MIN` minutes (default 30;
+  `/sg-setup repeat 0` disables).
+- If WordPress answers but has not checked its sites for over an hour (WP-Cron
+  dead), a stale-data alert fires.
+- With Zammad configured (`ZAMMAD_BASE_URL` + `ZAMMAD_API_TOKEN`, or
+  `/sg-setup tickets`), one ticket is opened per incident and closed on
+  recovery; reminders add internal notes to it.
+
 ## Running with Docker
 
 ```bash
@@ -87,7 +106,7 @@ Run `/help` in Discord for the full, always-current list. Highlights:
 **Actions:** `/pause <name>`, `/resume <name>`, `/refresh`, `/sg-refresh`
 
 **Setup (admin only):** `/setup status|alerts|timezone|alerts-toggle|smtp|smtp-test|smtp-clear|show`,
-`/sg-setup connect|disconnect|alerts|alerts-toggle|show`
+`/sg-setup connect|disconnect|alerts|alerts-toggle|show|tickets|repeat`
 
 ## HTTP endpoints
 

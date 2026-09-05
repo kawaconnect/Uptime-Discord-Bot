@@ -104,8 +104,13 @@ export function startAlerts(client: Client): void {
 }
 
 async function getAlertChannel(client: Client): Promise<TextChannel | null> {
-  const channelId = getSetting(ALERT_CHANNEL_KEY);
-  if (!channelId) return null;
+  // An alert must always land somewhere: fall back to the status-board channel
+  // when no dedicated alert channel has been configured, instead of dropping it.
+  const channelId = getSetting(ALERT_CHANNEL_KEY) ?? getSetting("SG_ALERT_CHANNEL_ID") ?? getSetting("STATUS_CHANNEL_ID");
+  if (!channelId) {
+    logger.error("No alert channel configured (run /setup alerts #channel) - Kuma alert DROPPED");
+    return null;
+  }
 
   try {
     const channel = await client.channels.fetch(channelId) as TextChannel | null;

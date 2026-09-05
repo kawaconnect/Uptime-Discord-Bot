@@ -24,6 +24,18 @@ const envSchema = z.object({
   SG_HEALTH_URL: z.string().optional(),
   SG_HEALTH_API_KEY: z.string().optional(),
   SG_HEALTH_POLL_MS: z.coerce.number().default(60_000),
+  // Minutes between reminder alerts while an outage persists (0 = off).
+  SG_ALERT_REPEAT_MIN: z.coerce.number().default(30),
+
+  // Zammad ticketing - optional. When both are set, a ticket is opened per
+  // incident (site down / WordPress unreachable) and closed on recovery.
+  // Can also be configured at runtime via /sg-setup tickets.
+  ZAMMAD_BASE_URL: z.string().optional(),
+  ZAMMAD_PUBLIC_URL: z.string().optional(),
+  ZAMMAD_API_TOKEN: z.string().optional(),
+  ZAMMAD_TICKET_GROUP: z.string().optional(),
+  ZAMMAD_TICKET_CUSTOMER: z.string().optional(),
+  ZAMMAD_TICKET_CLOSE_ON_RECOVERY: z.string().optional(),
 
   // SMTP - optional, for email alerts alongside Discord.
   // Can also be configured at runtime via /setup smtp slash command.
