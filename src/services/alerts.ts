@@ -61,7 +61,7 @@ async function runEscalationSweep(): Promise<void> {
     const key = `kuma:monitor:${monitor.id}`;
     stillDown.add(key);
     markDown(key);
-    await reportActive(key, `${monitor.name} is down.`, "uptime");
+    await reportActive(key, `${monitor.name} is down.`, "uptime", "kuma-down");
   }
 
   for (const key of trackedKeys()) {

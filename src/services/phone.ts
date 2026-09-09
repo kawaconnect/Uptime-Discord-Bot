@@ -9,7 +9,7 @@
  */
 
 import { logger } from "../util/logger.js";
-import { getSettingOrEnv } from "../db/index.js";
+import { getSettingOrEnv, setSetting } from "../db/index.js";
 
 /** Conditions currently down, and when we first saw them go down. */
 const activeSince = new Map<string, number>();
@@ -19,6 +19,45 @@ function config(): { url: string; token: string } | null {
   const token = (getSettingOrEnv("PBX_ALERT_TOKEN") || "").trim();
   if (!url || !token) return null;
   return { url, token };
+}
+
+/**
+ * Which conditions are allowed to ring a phone.
+ *
+ * Each is a separate toggle so a noisy category can be silenced without
+ * losing the rest. Everything defaults to on: a phone call is the last line
+ * of defence, and silently not calling is the worst failure this system has.
+ * Stored in the settings table so /phone can change them at runtime.
+ */
+export const CALL_KINDS = {
+  "kuma-down": "Uptime Kuma monitor down",
+  "sg-site-down": "SiteGuard: website down",
+  "sg-unreachable": "SiteGuard: health endpoint unreachable",
+  "sg-data-stale": "SiteGuard: monitoring data has gone stale",
+  "sg-ssl": "SiteGuard: SSL certificate expiring",
+} as const;
+
+export type CallKind = keyof typeof CALL_KINDS;
+
+function settingKey(kind: CallKind): string {
+  return `PHONE_CALL_${kind.toUpperCase().replace(/-/g, "_")}`;
+}
+
+/** True unless explicitly disabled. */
+export function isCallEnabledFor(kind: CallKind): boolean {
+  return getSettingOrEnv(settingKey(kind)) !== "false";
+}
+
+export function setCallEnabledFor(kind: CallKind, enabled: boolean): void {
+  setSetting(settingKey(kind), enabled ? "true" : "false");
+}
+
+export function callKindStates(): Array<{ kind: CallKind; label: string; enabled: boolean }> {
+  return (Object.keys(CALL_KINDS) as CallKind[]).map((kind) => ({
+    kind,
+    label: CALL_KINDS[kind],
+    enabled: isCallEnabledFor(kind),
+  }));
 }
 
 /** Whether phone escalation is switched on. Default: off. */
@@ -65,8 +104,10 @@ export async function reportActive(
   key: string,
   message: string,
   policy: "uptime" | "escalation" = "uptime",
+  kind: CallKind = "kuma-down",
 ): Promise<void> {
   if (!isPhoneEscalationEnabled()) return;
+  if (!isCallEnabledFor(kind)) return;
   const cfg = config();
   if (!cfg) return;
 

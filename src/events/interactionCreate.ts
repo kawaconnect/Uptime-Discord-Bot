@@ -19,6 +19,7 @@ import {
   handleSgDowntimeCommand,
   handleSgRefreshCommand,
 } from "../commands/sg-status.js";
+import { handlePhoneCommand } from "../commands/phone.js";
 
 export function onInteractionCreate(client: Client): void {
   client.on(Events.InteractionCreate, async (interaction) => {
@@ -45,6 +46,7 @@ export function onInteractionCreate(client: Client): void {
         case "resume": await handleResumeCommand(interaction); break;
         case "downtime": await handleDowntimeCommand(interaction); break;
         case "refresh": await handleRefreshCommand(interaction); break;
+        case "phone": await handlePhoneCommand(interaction); break;
         // SiteGuard commands
         case "sg-setup": await handleSgSetupCommand(interaction); break;
         case "sg-status": await handleSgStatusCommand(interaction); break;

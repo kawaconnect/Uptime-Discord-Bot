@@ -9,6 +9,7 @@ import { startWebServer } from "./web/server.js";
 import { kuma } from "./services/kuma.js";
 import { startStatusBoard, stopStatusBoard, updateStatusBoard } from "./services/statusBoard.js";
 import { startAlerts, stopAlerts } from "./services/alerts.js";
+import { phoneCommand } from "./commands/phone.js";
 import { startPresence, stopPresence } from "./services/presence.js";
 import { configureSmtp } from "./services/email.js";
 import { setupCommand } from "./commands/setup.js";
@@ -46,6 +47,7 @@ async function deployCommands() {
     resumeCommand.toJSON(),
     downtimeCommand.toJSON(),
     refreshCommand.toJSON(),
+    phoneCommand.toJSON(),
   ];
 
   // SiteGuard commands - always registered so /sg-setup connect can be used

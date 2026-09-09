@@ -108,6 +108,12 @@ let reminderTimer: ReturnType<typeof setInterval> | null = null;
 const lastSentAt = new Map<string, number>();
 /** Sites currently known to be down (site_id -> site). */
 const downSites = new Map<number, SgSite>();
+/** Sites with a certificate expiring, and when monitoring data went stale. */
+const sslExpiring = new Map<number, SgSite>();
+/** SSL warnings already escalated, so a cert expiring in three weeks does
+ *  not ring a phone every cooldown window until someone renews it. */
+const sslEscalated = new Set<number>();
+let dataStaleSince: number | null = null;
 
 async function getSgAlertChannel(client: Client): Promise<TextChannel | null> {
   // Dedicated SG channel → Kuma alert channel → status board channel.
@@ -188,6 +194,8 @@ export function startSgAlerts(client: Client): void {
     downSites.delete(site.site_id);
     lastSentAt.delete(`site:${site.site_id}`);
     markUp(`sg:site:${site.site_id}`).catch(() => undefined);
+    sslExpiring.delete(site.site_id);
+    sslEscalated.delete(site.site_id);
     if (!isSgEnabled("SITE_RECOVERY")) return;
     sendSiteRecoveryAlert(client, site).catch((err) =>
       logger.error({ err, domain: site.domain }, "Failed to send SG recovery alert")
@@ -196,6 +204,8 @@ export function startSgAlerts(client: Client): void {
 
   // ---- SSL expiring ----
   siteguard.on("sslExpiring", (site: SgSite) => {
+    sslExpiring.set(site.site_id, site);
+    markDown(`sg:ssl:${site.site_id}`);
     if (!isSgEnabled("SSL_EXPIRING")) return;
     sendSslExpiringAlert(client, site).catch((err) =>
       logger.error({ err, domain: site.domain }, "Failed to send SG SSL alert")
@@ -222,12 +232,16 @@ export function startSgAlerts(client: Client): void {
 
   // ---- Health data stale (WP cron dead) ----
   siteguard.on("dataStale", (ageSec: number) => {
+    dataStaleSince = dataStaleSince ?? Date.now();
+    markDown("sg:data-stale");
     if (!isSgEnabled("DATA_STALE")) return;
     sendDataStaleAlert(client, ageSec).catch((err) =>
       logger.error({ err }, "Failed to send SG stale-data alert")
     );
   });
   siteguard.on("dataFresh", () => {
+    dataStaleSince = null;
+    markUp("sg:data-stale").catch(() => undefined);
     lastSentAt.delete("stale");
     sendDataFreshAlert(client).catch((err) =>
       logger.error({ err }, "Failed to send SG data-fresh alert")
@@ -258,7 +272,30 @@ async function reportDownSitesToPbx(): Promise<void> {
     const key = `sg:site:${site.site_id}`;
     markDown(key);
     const name = site.domain || `site ${site.site_id}`;
-    await reportActive(key, `Web site ${name} is down.`, "uptime");
+    await reportActive(key, `Web site ${name} is down.`, "uptime", "sg-site-down");
+  }
+
+  for (const site of sslExpiring.values()) {
+    if (sslEscalated.has(site.site_id)) continue;
+    const key = `sg:ssl:${site.site_id}`;
+    markDown(key);
+    const name = site.domain || `site ${site.site_id}`;
+    await reportActive(key, `S S L certificate for ${name} is expiring soon.`, "uptime", "sg-ssl");
+    sslEscalated.add(site.site_id);
+    await markUp(key).catch(() => undefined);
+  }
+
+  // Stale data means SiteGuard is answering but its numbers stopped moving,
+  // so every site could be down and look fine. Worth a call, but on a longer
+  // fuse than an outage so a brief blip does not wake anyone.
+  if (dataStaleSince !== null && Date.now() - dataStaleSince >= 15 * 60_000) {
+    markDown("sg:data-stale");
+    await reportActive(
+      "sg:data-stale",
+      "Site Guard monitoring data has gone stale. Sites are not being checked.",
+      "uptime",
+      "sg-data-stale",
+    );
   }
 }
 
