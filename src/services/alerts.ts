@@ -20,14 +20,56 @@ import { getSetting } from "../db/index.js";
 import { kuma, MonitorStatus, statusEmoji, type KumaMonitor, type KumaHeartbeat } from "./kuma.js";
 import { discordQueue } from "../queue/index.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
+import { isPhoneEscalationEnabled, markDown, markUp, reportActive, trackedKeys } from "./phone.js";
 
 const ALERT_CHANNEL_KEY = "ALERT_CHANNEL_ID";
 const DISCONNECT_GRACE_MS = 30_000;
+
+/** How often we re-report still-down monitors to the PBX. */
+const ESCALATION_TICK_MS = 60_000;
+let escalationTimer: ReturnType<typeof setInterval> | null = null;
 
 let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wasDisconnected = false;
 /** Guard against double-registration of Kuma event listeners. */
 let alertsStarted = false;
+
+/** Stops the escalation sweep. Called on shutdown. */
+export function stopAlerts(): void {
+  if (escalationTimer) {
+    clearInterval(escalationTimer);
+    escalationTimer = null;
+  }
+}
+
+/**
+ * Reports every monitor that is still down to the PBX, and clears the ones
+ * that recovered. Paused monitors, monitors inside a paused group, and
+ * monitors in a maintenance window are all skipped - a deliberately silenced
+ * location must never ring a phone.
+ */
+async function runEscalationSweep(): Promise<void> {
+  if (!isPhoneEscalationEnabled()) return;
+  if (!kuma.connected) return; // a dead socket is not evidence that sites are down
+
+  const stillDown = new Set<string>();
+
+  for (const { monitor } of kuma.getDownMonitors()) {
+    if (kuma.isEffectivelyPaused(monitor.id)) continue;
+    if (kuma.latestStatus.get(monitor.id) === MonitorStatus.MAINTENANCE) continue;
+
+    const key = `kuma:monitor:${monitor.id}`;
+    stillDown.add(key);
+    markDown(key);
+    await reportActive(key, `${monitor.name} is down.`, "uptime");
+  }
+
+  for (const key of trackedKeys()) {
+    if (key.startsWith("kuma:monitor:") && !stillDown.has(key)) {
+      await markUp(key);
+    }
+  }
+}
 
 function isEnabled(type: string): boolean {
   return getSetting(`ALERT_${type.toUpperCase()}_ENABLED`) !== "false";
@@ -49,6 +91,17 @@ export function startAlerts(client: Client): void {
     return;
   }
   alertsStarted = true;
+
+  // Phone escalation runs as a periodic sweep rather than off statusChange.
+  // A monitor that was already down when the socket reconnected never emits
+  // statusChange, so an event-driven check would silently miss exactly the
+  // outages that have lasted longest.
+  if (escalationTimer) clearInterval(escalationTimer);
+  escalationTimer = setInterval(() => {
+    runEscalationSweep().catch((err) =>
+      logger.error({ err }, "Phone escalation sweep failed"),
+    );
+  }, ESCALATION_TICK_MS);
 
   // ---- Connection loss (socket-level disconnect) ----
   kuma.on("disconnected", (reason) => {
@@ -95,7 +148,9 @@ export function startAlerts(client: Client): void {
       sendDownAlert(client, monitor, heartbeat).catch((err) =>
         logger.error({ err, monitorId: monitor.id }, "Failed to send down alert")
       );
+      markDown(`kuma:monitor:${monitor.id}`);
     } else if (heartbeat.status === MonitorStatus.UP && previousStatus === MonitorStatus.DOWN && isEnabled("recovery")) {
+      markUp(`kuma:monitor:${monitor.id}`).catch(() => undefined);
       sendRecoveryAlert(client, monitor, heartbeat).catch((err) =>
         logger.error({ err, monitorId: monitor.id }, "Failed to send recovery alert")
       );

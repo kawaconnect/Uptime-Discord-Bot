@@ -8,7 +8,7 @@ import { createClient } from "./client.js";
 import { startWebServer } from "./web/server.js";
 import { kuma } from "./services/kuma.js";
 import { startStatusBoard, stopStatusBoard, updateStatusBoard } from "./services/statusBoard.js";
-import { startAlerts } from "./services/alerts.js";
+import { startAlerts, stopAlerts } from "./services/alerts.js";
 import { startPresence, stopPresence } from "./services/presence.js";
 import { configureSmtp } from "./services/email.js";
 import { setupCommand } from "./commands/setup.js";
@@ -139,6 +139,7 @@ async function shutdown(signal: string) {
   logger.info({ signal }, "Shutting down");
   siteguard.stop();
   stopSgAlerts();
+  stopAlerts();
   stopStatusBoard();
   stopPresence();
   kuma.disconnect();

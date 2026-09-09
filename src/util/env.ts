@@ -31,6 +31,13 @@ const envSchema = z.object({
   SG_DIRECT_PROBE: z.string().optional(),
   SG_DIRECT_PROBE_FAILS: z.coerce.number().default(2),
 
+  // Phone escalation - optional. When enabled, a monitor that stays down is
+  // reported to the PBX connector, which decides when to actually call and
+  // drives the escalation chain. Timing and quiet hours live on the PBX.
+  PHONE_ESCALATION_ENABLED: z.string().optional(),
+  PBX_ALERT_URL: z.string().optional(),
+  PBX_ALERT_TOKEN: z.string().optional(),
+
   // Zammad ticketing - optional. When both are set, a ticket is opened per
   // incident (site down / WordPress unreachable) and closed on recovery.
   // Can also be configured at runtime via /sg-setup tickets.

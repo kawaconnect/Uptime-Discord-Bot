@@ -631,6 +631,26 @@ class KumaClient extends EventEmitter {
     return { total: this._monitors.size, up, down, pending, maintenance, paused, active };
   }
 
+  /**
+   * True when the monitor itself, or any group above it, is paused.
+   * Kuma does not push a paused parent's state down to its children, so a
+   * child of a paused group still reports active: true and would otherwise
+   * keep alerting after the whole location was deliberately silenced.
+   */
+  isEffectivelyPaused(monitorId: number): boolean {
+    const seen = new Set<number>();
+    let current = this._monitors.get(monitorId);
+    while (current) {
+      if (!current.active) return true;
+      if (seen.has(current.id)) break; // guard against a cycle in parent links
+      seen.add(current.id);
+      const parentId = current.parent;
+      if (parentId === null || parentId === undefined) break;
+      current = this._monitors.get(parentId);
+    }
+    return false;
+  }
+
   getDownMonitors(): Array<{ monitor: KumaMonitor; status: number }> {
     const result: Array<{ monitor: KumaMonitor; status: number }> = [];
     for (const [id, monitor] of this._monitors) {
