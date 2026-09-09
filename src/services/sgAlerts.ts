@@ -41,6 +41,7 @@ import {
   noteIncidentTicket,
   ticketUrl,
 } from "./tickets.js";
+import { isPhoneEscalationEnabled, markDown, markUp, reportActive } from "./phone.js";
 
 const SG_ALERT_CHANNEL_KEY = "SG_ALERT_CHANNEL_ID";
 const REMINDER_TICK_MS = 60_000;
@@ -175,6 +176,7 @@ export function startSgAlerts(client: Client): void {
   // ---- Site goes DOWN ----
   siteguard.on("siteDown", (site: SgSite) => {
     downSites.set(site.site_id, site);
+    markDown(`sg:site:${site.site_id}`);
     if (!isSgEnabled("SITE_DOWN")) return;
     sendSiteDownAlert(client, site).catch((err) =>
       logger.error({ err, domain: site.domain }, "Failed to send SG site down alert")
@@ -185,6 +187,7 @@ export function startSgAlerts(client: Client): void {
   siteguard.on("siteRecovery", (site: SgSite) => {
     downSites.delete(site.site_id);
     lastSentAt.delete(`site:${site.site_id}`);
+    markUp(`sg:site:${site.site_id}`).catch(() => undefined);
     if (!isSgEnabled("SITE_RECOVERY")) return;
     sendSiteRecoveryAlert(client, site).catch((err) =>
       logger.error({ err, domain: site.domain }, "Failed to send SG recovery alert")
@@ -201,6 +204,7 @@ export function startSgAlerts(client: Client): void {
 
   // ---- WordPress unreachable ----
   siteguard.on("unreachable", (errorMsg: string) => {
+    markDown("sg:unreachable");
     if (!isSgEnabled("WP_UNREACHABLE")) return;
     sendUnreachableAlert(client, errorMsg).catch((err) =>
       logger.error({ err }, "Failed to send SG unreachable alert")
@@ -209,6 +213,7 @@ export function startSgAlerts(client: Client): void {
 
   // ---- WordPress reachable again ----
   siteguard.on("reachable", () => {
+    markUp("sg:unreachable").catch(() => undefined);
     lastSentAt.delete("unreachable");
     sendReachableAlert(client).catch((err) =>
       logger.error({ err }, "Failed to send SG reachable alert")
@@ -233,10 +238,28 @@ export function startSgAlerts(client: Client): void {
   if (!reminderTimer) {
     reminderTimer = setInterval(() => {
       runReminders(client).catch((err) => logger.error({ err }, "SG reminder tick failed"));
+      reportDownSitesToPbx().catch((err) => logger.error({ err }, "SG phone escalation tick failed"));
     }, REMINDER_TICK_MS);
   }
 
   logger.info({ tickets: isTicketingConfigured(), repeatMin: repeatMinutes() }, "SiteGuard alerts started");
+}
+
+/**
+ * Reports every WordPress site still down to the PBX, which decides when a
+ * call is actually due. Runs on the same tick as the Discord reminders.
+ * Re-seeds markDown so a site that was already down when the bot restarted
+ * still escalates rather than waiting for a fresh transition.
+ */
+async function reportDownSitesToPbx(): Promise<void> {
+  if (!isPhoneEscalationEnabled()) return;
+
+  for (const site of downSites.values()) {
+    const key = `sg:site:${site.site_id}`;
+    markDown(key);
+    const name = site.domain || `site ${site.site_id}`;
+    await reportActive(key, `Web site ${name} is down.`, "uptime");
+  }
 }
 
 export function stopSgAlerts(): void {
