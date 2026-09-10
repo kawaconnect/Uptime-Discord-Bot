@@ -20,6 +20,7 @@ import {
   handleSgRefreshCommand,
 } from "../commands/sg-status.js";
 import { handlePhoneCommand } from "../commands/phone.js";
+import { handleSgPauseCommand } from "../commands/sg-pause.js";
 
 export function onInteractionCreate(client: Client): void {
   client.on(Events.InteractionCreate, async (interaction) => {
@@ -53,6 +54,7 @@ export function onInteractionCreate(client: Client): void {
         case "sg-monitors": await handleSgMonitorsCommand(interaction); break;
         case "sg-downtime": await handleSgDowntimeCommand(interaction); break;
         case "sg-refresh": await handleSgRefreshCommand(interaction); break;
+        case "sg-pause": await handleSgPauseCommand(interaction); break;
         default:
           await interaction.reply({ content: "Unknown command.", ephemeral: true });
       }

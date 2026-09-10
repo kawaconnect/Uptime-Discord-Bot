@@ -10,6 +10,7 @@ import { kuma } from "./services/kuma.js";
 import { startStatusBoard, stopStatusBoard, updateStatusBoard } from "./services/statusBoard.js";
 import { startAlerts, stopAlerts } from "./services/alerts.js";
 import { phoneCommand } from "./commands/phone.js";
+import { sgPauseCommand } from "./commands/sg-pause.js";
 import { startPresence, stopPresence } from "./services/presence.js";
 import { configureSmtp } from "./services/email.js";
 import { setupCommand } from "./commands/setup.js";
@@ -58,6 +59,7 @@ async function deployCommands() {
     sgMonitorsCommand.toJSON(),
     sgDowntimeCommand.toJSON(),
     sgRefreshCommand.toJSON(),
+    sgPauseCommand.toJSON(),
   );
 
   const rest = new REST().setToken(config.DISCORD_TOKEN);

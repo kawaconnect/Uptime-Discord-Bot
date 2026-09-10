@@ -29,7 +29,7 @@ import {
 } from "discord.js";
 import { logger } from "../util/logger.js";
 import { env } from "../util/env.js";
-import { getSetting } from "../db/index.js";
+import { getSetting, setSetting } from "../db/index.js";
 import { siteguard, sgStatusEmoji, type SgSite } from "./siteguard.js";
 import { discordQueue } from "../queue/index.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
@@ -46,7 +46,26 @@ import { isPhoneEscalationEnabled, markDown, markUp, reportActive } from "./phon
 const SG_ALERT_CHANNEL_KEY = "SG_ALERT_CHANNEL_ID";
 const REMINDER_TICK_MS = 60_000;
 
+const SG_PAUSED_KEY = "SG_MONITORING_PAUSED";
+
+/**
+ * True while SiteGuard monitoring is paused.
+ *
+ * Pausing suppresses every outward effect - Discord alerts, Zammad tickets
+ * and phone calls - while leaving the poller running, so state stays current
+ * and recovery is detected normally. Intended for planned maintenance, where
+ * the sites are expected to be down and nobody should be woken about it.
+ */
+export function isSgPaused(): boolean {
+  return getSetting(SG_PAUSED_KEY) === "true";
+}
+
+export function setSgPaused(paused: boolean): void {
+  setSetting(SG_PAUSED_KEY, paused ? "true" : "false");
+}
+
 function isSgEnabled(type: string): boolean {
+  if (isSgPaused()) return false;
   return getSetting(`SG_ALERT_${type.toUpperCase()}_ENABLED`) !== "false";
 }
 
@@ -72,6 +91,7 @@ function isTicketsEnabled(): boolean {
  * does both. Returns a Discord line describing where the ticket went.
  */
 async function deliverIncident(incidentKey: string, subject: string, html: string): Promise<string> {
+  if (isSgPaused()) return "";
   const emailed = await maybeEmail(subject, html);
   const mode = ticketMode();
   const wantApi = isTicketsEnabled() && (mode === "always" || (mode === "fallback" && !emailed));
@@ -266,6 +286,7 @@ export function startSgAlerts(client: Client): void {
  * still escalates rather than waiting for a fresh transition.
  */
 async function reportDownSitesToPbx(): Promise<void> {
+  if (isSgPaused()) return;
   if (!isPhoneEscalationEnabled()) return;
 
   for (const site of downSites.values()) {
