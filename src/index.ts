@@ -26,6 +26,7 @@ import {
 } from "./commands/status.js";
 import { siteguard } from "./services/siteguard.js";
 import { startSgAlerts, stopSgAlerts } from "./services/sgAlerts.js";
+import { registerAckTicketClosing } from "./services/ackTickets.js";
 import { sgSetupCommand } from "./commands/sg-setup.js";
 import {
   sgStatusCommand,
@@ -125,6 +126,7 @@ async function main() {
   // when WordPress was already unreachable at startup (the exact moment an
   // alert matters most) the "unreachable" event fired into the void.
   startSgAlerts(client);
+  registerAckTicketClosing(client);
   if (siteguard.isConfigured) {
     logger.info({ url: siteguard.getUrl() }, "Starting SiteGuard health monitor");
     siteguard.start();

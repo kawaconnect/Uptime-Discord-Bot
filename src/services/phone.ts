@@ -14,6 +14,29 @@ import { getSettingOrEnv, setSetting } from "../db/index.js";
 /** Conditions currently down, and when we first saw them go down. */
 const activeSince = new Map<string, number>();
 
+/** What the PBX tells us once somebody pressed 1 for an alert. */
+export interface PhoneAck {
+  key: string;
+  /** e.g. "mobile (15555550100)" */
+  by: string;
+  /** epoch seconds */
+  at: number;
+  callId?: string;
+}
+
+type AckHandler = (ack: PhoneAck) => Promise<void>;
+const ackHandlers: AckHandler[] = [];
+/** Keys whose acknowledgement has already been acted on this outage. */
+const ackHandled = new Set<string>();
+
+/**
+ * Registers a callback for the moment an alert is acknowledged by phone.
+ * Fires once per outage per key; a recovery (markUp) re-arms it.
+ */
+export function onPhoneAcknowledged(handler: AckHandler): void {
+  ackHandlers.push(handler);
+}
+
 function config(): { url: string; token: string } | null {
   const url = (getSettingOrEnv("PBX_ALERT_URL") || "").trim().replace(/\/$/, "");
   const token = (getSettingOrEnv("PBX_ALERT_TOKEN") || "").trim();
@@ -76,6 +99,7 @@ export function markDown(key: string): number {
 
 /** Clears a condition and tells the PBX to drop its cooldown bookkeeping. */
 export async function markUp(key: string): Promise<void> {
+  ackHandled.delete(key);
   if (!activeSince.delete(key)) return;
   const cfg = config();
   if (!cfg) return;
@@ -89,6 +113,11 @@ export async function markUp(key: string): Promise<void> {
   } catch (err) {
     logger.debug({ err, key }, "Failed to clear PBX alert state");
   }
+}
+
+/** When a condition was first seen down, if it is currently tracked. */
+export function downSince(key: string): number | undefined {
+  return activeSince.get(key);
 }
 
 /** Drops any tracked condition whose key is no longer relevant. */
@@ -134,9 +163,26 @@ export async function reportActive(
     const body = (await res.json().catch(() => ({}))) as {
       called?: boolean;
       reason?: string;
+      acknowledged_by?: string | null;
+      acknowledged_at?: number | null;
+      call_id?: string | null;
     };
     if (body.called) {
       logger.info({ key }, "PBX is placing an alert call");
+    } else if (body.reason === "acknowledged") {
+      if (!ackHandled.has(key)) {
+        ackHandled.add(key);
+        const ack: PhoneAck = {
+          key,
+          by: body.acknowledged_by || "phone",
+          at: Number(body.acknowledged_at) || Math.floor(Date.now() / 1000),
+          callId: body.call_id || undefined,
+        };
+        logger.info({ key, by: ack.by }, "Alert acknowledged by phone");
+        for (const handler of ackHandlers) {
+          handler(ack).catch((err) => logger.error({ err, key }, "Phone acknowledgement handler failed"));
+        }
+      }
     } else {
       logger.debug({ key, reason: body.reason }, "PBX did not call yet");
     }

@@ -103,6 +103,82 @@ async function zammad(cfg: TicketConfig, path: string, init: RequestInit): Promi
   return res.json();
 }
 
+const OPEN_STATES = new Set(["new", "open", "pending reminder", "pending close"]);
+
+async function isTicketStillOpen(cfg: TicketConfig, id: number): Promise<boolean> {
+  try {
+    const t = await zammad(cfg, `/tickets/${id}?expand=true`, { method: "GET" });
+    return OPEN_STATES.has(String(t.state ?? "").toLowerCase());
+  } catch {
+    return true; // unknown: keep the record rather than open a duplicate
+  }
+}
+
+/**
+ * Closes the incident ticket tracked for a key because a human acknowledged
+ * the alert by phone. Always closes, regardless of closeOnRecovery: an
+ * acknowledgement is a person saying "I have this".
+ */
+export async function closeIncidentTicketOnAck(incidentKey: string, bodyHtml: string): Promise<OpenTicketRecord | null> {
+  const cfg = getTicketConfig();
+  const rec = getOpenTicket(incidentKey);
+  if (!rec || !cfg) return null;
+  deleteSetting(recordKey(incidentKey));
+  try {
+    await zammad(cfg, `/tickets/${rec.id}`, {
+      method: "PUT",
+      body: JSON.stringify({
+        state: "closed",
+        article: { body: bodyHtml, type: "note", internal: true, content_type: "text/html" },
+      }),
+    });
+    logger.info({ incidentKey, ticket: rec.number }, "Closed incident ticket on phone acknowledgement");
+    return rec;
+  } catch (err) {
+    logger.error({ err, incidentKey, ticket: rec.number }, "Failed to close incident ticket on acknowledgement");
+    return null;
+  }
+}
+
+/**
+ * Closes open tickets whose title starts with `titlePrefix` and that were
+ * created since `sinceEpochMs`. Used for tickets the bot did not open itself,
+ * e.g. the "<monitor> Down: ..." emails Uptime Kuma sends to Zammad.
+ */
+export async function closeMatchingTickets(
+  titlePrefix: string,
+  sinceEpochMs: number,
+  bodyHtml: string
+): Promise<OpenTicketRecord[]> {
+  const cfg = getTicketConfig();
+  if (!cfg) return [];
+  const closed: OpenTicketRecord[] = [];
+  try {
+    const query = `title:"${titlePrefix.replace(/"/g, " ")}" AND state.name:(new OR open OR "pending reminder" OR "pending close")`;
+    const found = await zammad(cfg, `/tickets/search?query=${encodeURIComponent(query)}&limit=20&expand=true`, { method: "GET" });
+    const list: any[] = Array.isArray(found) ? found : Array.isArray(found?.tickets) ? found.tickets : [];
+    for (const t of list) {
+      const title = String(t.title ?? "");
+      const created = Date.parse(String(t.created_at ?? "")) || 0;
+      if (!title.toLowerCase().startsWith(titlePrefix.toLowerCase())) continue;
+      if (created && created < sinceEpochMs - 15 * 60_000) continue;
+      if (!OPEN_STATES.has(String(t.state ?? "").toLowerCase())) continue;
+      await zammad(cfg, `/tickets/${t.id}`, {
+        method: "PUT",
+        body: JSON.stringify({
+          state: "closed",
+          article: { body: bodyHtml, type: "note", internal: true, content_type: "text/html" },
+        }),
+      });
+      closed.push({ id: Number(t.id), number: String(t.number ?? t.id), opened_at: Math.floor(created / 1000) });
+      logger.info({ ticket: t.number, title }, "Closed matching ticket on phone acknowledgement");
+    }
+  } catch (err) {
+    logger.error({ err, titlePrefix }, "Failed to search/close matching tickets");
+  }
+  return closed;
+}
+
 /** Public URL for humans (ZAMMAD_PUBLIC_URL wins over the API base URL). */
 export function ticketUrl(id: number): string {
   const pub = (getSettingOrEnv("ZAMMAD_PUBLIC_URL") ?? getSettingOrEnv("ZAMMAD_BASE_URL") ?? "").replace(/\/+$/, "");
@@ -125,8 +201,14 @@ export async function openIncidentTicket(
 
   const existing = getOpenTicket(incidentKey);
   if (existing) {
-    logger.debug({ incidentKey, ticket: existing.number }, "Incident ticket already open - not creating another");
-    return existing;
+    // Somebody may have closed it by hand since; a closed ticket must not
+    // swallow the next outage's notes.
+    if (await isTicketStillOpen(cfg, existing.id)) {
+      logger.debug({ incidentKey, ticket: existing.number }, "Incident ticket already open - not creating another");
+      return existing;
+    }
+    logger.info({ incidentKey, ticket: existing.number }, "Tracked incident ticket is closed - opening a new one");
+    deleteSetting(recordKey(incidentKey));
   }
 
   try {
