@@ -20,6 +20,14 @@ import {
   isPhoneEscalationEnabled,
 } from "../services/phone.js";
 import { getSettingOrEnv } from "../db/index.js";
+import { env } from "../util/env.js";
+
+// Same rule as /setup, /sg-setup and /sg-pause: an empty ADMIN_USER_IDS
+// allows everyone who can see the command.
+function isAdmin(userId: string): boolean {
+  const ids = env().ADMIN_USER_IDS;
+  return ids.length === 0 || ids.includes(userId);
+}
 
 const kindChoices = (Object.keys(CALL_KINDS) as CallKind[]).map((k) => ({
   name: CALL_KINDS[k],
@@ -58,10 +66,22 @@ export async function handlePhoneCommand(
   const sub = interaction.options.getSubcommand();
 
   if (sub === "toggle") {
+    // Turning a call type off silences the last line of defence, so it is
+    // restricted to admins (same rule as /setup, /sg-setup and /sg-pause).
+    if (!isAdmin(interaction.user.id)) {
+      await interaction.reply({
+        content: "You are not permitted to change phone escalation settings.",
+        ephemeral: true,
+      });
+      return;
+    }
     const kind = interaction.options.getString("type", true) as CallKind;
     const on = interaction.options.getString("state", true) === "on";
     setCallEnabledFor(kind, on);
-    logger.info({ kind, enabled: on }, "Phone escalation toggled");
+    logger.info(
+      { kind, enabled: on, user: interaction.user.tag },
+      "Phone escalation toggled",
+    );
     await interaction.reply({
       content: `Phone calls for **${CALL_KINDS[kind]}** are now **${on ? "on" : "off"}**.`,
       ephemeral: true,
