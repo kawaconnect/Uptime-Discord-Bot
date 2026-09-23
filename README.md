@@ -79,7 +79,9 @@ docker run -d --name uptime-bot \
 
 The image exposes a health endpoint on port `3100` (`/healthz`) and runs as a
 non-root user. Mount a volume at `/app/data` to persist the settings database.
-Prebuilt images are published to GHCR by CI on push to `master` and on `v*` tags.
+Prebuilt images are built by GitLab CI (`.gitlab-ci.yml`) on `v*` tags or when a
+pipeline is run manually, and mirrored to GHCR. GitHub Actions is disabled on
+the repository, so pushing to `master` alone does not publish an image.
 
 ## Local development
 
