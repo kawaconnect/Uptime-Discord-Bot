@@ -79,9 +79,8 @@ docker run -d --name uptime-bot \
 
 The image exposes a health endpoint on port `3100` (`/healthz`) and runs as a
 non-root user. Mount a volume at `/app/data` to persist the settings database.
-Prebuilt images are built by GitLab CI (`.gitlab-ci.yml`) on `v*` tags or when a
-pipeline is run manually, and mirrored to GHCR. GitHub Actions is disabled on
-the repository, so pushing to `master` alone does not publish an image.
+Prebuilt images come from GitLab CI; see
+[Building / Releases (GitLab CI)](#building--releases-gitlab-ci).
 
 ## Local development
 
@@ -103,6 +102,43 @@ npm run dev            # tsx watch with hot reload
 There is no test suite or linter; `npm run typecheck` (under `strict`) is the
 verification story. The project is ESM with `Node16` module resolution, so all
 relative imports use explicit `.js` extensions.
+
+## Building / Releases (GitLab CI)
+
+GitHub Actions is disabled on the repository; `.gitlab-ci.yml` is the only
+pipeline. It includes the shared `dean/ci-templates` `/docker.yml` template,
+which sets when pipelines run and the stages.
+
+**When it runs:** on a `v*` tag, or when a pipeline is started by hand from the
+GitLab UI (Build > Pipelines > Run pipeline) or the API. Pushes to `master` and
+merge requests do not start a pipeline.
+
+**Jobs:**
+
+| Stage | Job | What it does |
+|-------|-----|--------------|
+| `test` | `check` | On `node:24-alpine` (the Dockerfile's base image): `npm ci`, `npm run typecheck`, `npm run build`, then `ci/smoke.sh`, which checks `dist/index.js` exists and that the better-sqlite3 native binding loads and runs a query. The bot itself is not started (it needs Discord and Kuma). |
+| `build` | `build` | Builds the `Dockerfile` with Docker-in-Docker on the cluster runner, pushes to the GitLab container registry as `uptime-discord-bot`, and mirrors the tags to `ghcr.io/deenyoro/uptime-discord-bot` (the same name the old GitHub workflow published; skipped if the instance-level `GHCR_TOKEN` variable is unset). Runs only if `check` passed. |
+
+**Image tags:** every build gets `sha-<short sha>`. A tag `v1.2.3` (or a manual
+run with `RELEASE_VERSION=v1.2.3`) also gets `1.2.3`, `1.2` and `latest`. A
+manual run on a branch without `RELEASE_VERSION` gets `<branch>` and
+`<branch>-<short sha>`, plus `latest` on `master`.
+
+**Pipeline variables for manual runs:**
+
+- `RELEASE_VERSION=v1.2.3`: tag the image as that version without a git tag.
+- `DOCKER_PUSH=false`: run the checks and build the image, but push nothing.
+
+**Cutting a release:** bump `version` in `package.json` (and
+`package-lock.json`), add a `CHANGELOG.md` entry, commit, then push an
+annotated `vX.Y.Z` tag. The tag pipeline checks, builds and publishes the image.
+
+To run the same checks locally on Node 24:
+
+```bash
+npm ci && npm run typecheck && npm run build && sh ci/smoke.sh
+```
 
 ## Commands
 

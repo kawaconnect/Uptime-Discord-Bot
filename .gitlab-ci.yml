@@ -1,14 +1,41 @@
-# Container images for Uptime-Discord-Bot, built on GitLab and mirrored to GHCR.
+# Checks and container image for Uptime-Discord-Bot, built on GitLab and
+# mirrored to GHCR.
 #
 # Ported from .github/workflows/build-and-push.yml - GitHub Actions is disabled on the
 # repository, so this is the only thing that builds these images. Pipelines run
 # on a v* tag, or manually from the UI/API (set RELEASE_VERSION=v1.2.3 to stamp
 # a version without tagging, DOCKER_PUSH=false to build without publishing).
+# The workflow rules and stages (test, build, release) come from the shared
+# template.
+#
+# The test stage type-checks and compiles the bot on the same Node the
+# Dockerfile uses; the image only builds once that passes. There is no test
+# suite in the repo, so the check also loads the compiled better-sqlite3
+# native binding, the one dependency that can fail to install on Alpine.
 
 include:
   - project: dean/ci-templates
     ref: main
     file: /docker.yml
+
+# Same base image as both Dockerfile stages.
+check:
+  stage: test
+  tags: [linux]
+  image: node:24-alpine
+  interruptible: true
+  variables:
+    GIT_DEPTH: "1"
+  cache:
+    key: npm
+    paths: [.npm/]
+  script:
+    - node --version
+    # npm ci installs exactly package-lock.json, as the Dockerfile does.
+    - npm ci --no-audit --no-fund --cache .npm --prefer-offline
+    - npm run typecheck
+    - npm run build
+    - sh ci/smoke.sh
 
 build:
   extends: .docker-build
