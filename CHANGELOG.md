@@ -2,6 +2,25 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.2] - 2026-09-24
+
+### CI
+- The GitLab pipeline now has a `check` job (test stage) that runs
+  `npm ci`, `npm run typecheck`, `npm run build` and `ci/smoke.sh` on
+  `node:24-alpine`, the Dockerfile's base image. The smoke script checks
+  that `dist/index.js` was emitted and that the better-sqlite3 native
+  binding loads and runs a query. The image build only runs once the check
+  passes. Pipelines still run only on `v*` tags and manual/API runs.
+
+### Changed
+- App version in `package.json` bumped 1.0.1 -> 1.0.2. The bot's behavior
+  does not change.
+
+### Documentation
+- README has a "Building / Releases (GitLab CI)" section: when pipelines
+  run, what each job does, image tags, `RELEASE_VERSION` / `DOCKER_PUSH`,
+  and how to cut a release.
+
 ## [1.0.1] - 2026-09-24
 
 Changes since the last pre-release commit (cfb7d82, "update dependency
