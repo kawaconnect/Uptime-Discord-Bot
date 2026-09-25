@@ -29,8 +29,8 @@ export async function handleHelpCommand(
       {
         name: "Actions",
         value: [
-          "`/pause <name>` - Pause a monitor (autocomplete)",
-          "`/resume <name>` - Resume a paused monitor (autocomplete)",
+          "`/pause <name>` - Pause a monitor (admin only, autocomplete)",
+          "`/resume <name>` - Resume a paused monitor (admin only, autocomplete)",
           "`/refresh` - Force refresh the status board embed",
         ].join("\n"),
         inline: false,

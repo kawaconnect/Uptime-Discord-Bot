@@ -1,0 +1,13 @@
+{
+  "request": "GET /wp-json/sgbackup/v1/health",
+  "http_status": 429,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.026243,
+  "body": {
+    "code": "rate_limited",
+    "message": "Too many failed attempts. Try again later.",
+    "data": {
+      "status": 429
+    }
+  }
+}

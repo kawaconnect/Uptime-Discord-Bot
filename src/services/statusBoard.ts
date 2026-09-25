@@ -11,12 +11,12 @@ import {
   EmbedBuilder,
   TextChannel,
   Message,
-  Events,
 } from "discord.js";
 import { logger } from "../util/logger.js";
 import { getSetting, setSetting } from "../db/index.js";
 import { kuma, MonitorStatus, statusEmoji, statusLabel, type KumaMonitor } from "./kuma.js";
-import { siteguard, sgStatusEmoji, SgStatus, type SgSite } from "./siteguard.js";
+import { NO_MENTIONS } from "../util/mentions.js";
+import { siteguard, sgStatusEmoji, sgSiteLabel, SgStatus, type SgSite } from "./siteguard.js";
 import { discordQueue } from "../queue/index.js";
 
 const STATUS_CHANNEL_KEY = "STATUS_CHANNEL_ID";
@@ -29,7 +29,6 @@ const REFRESH_INTERVAL_MS = 15_000;
 const SG_STALE_THRESHOLD_SEC = 30 * 60;
 
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
-let needsReanchor = false;
 /** Mutex - prevents concurrent updateStatusBoard calls from racing. */
 let updating = false;
 /** Guard against double-registration of listeners and the refresh timer. */
@@ -65,14 +64,6 @@ export function startStatusBoard(client: Client): void {
     updateStatusBoard(client).catch((err) =>
       logger.warn({ err }, "Failed to update status board on SiteGuard update")
     );
-  });
-
-  // Watch for messages in status channel - flag for re-anchor
-  client.on(Events.MessageCreate, (msg) => {
-    if (msg.author.bot) return;
-    const channelId = getSetting(STATUS_CHANNEL_KEY);
-    if (!channelId || msg.channelId !== channelId) return;
-    needsReanchor = true;
   });
 
   // MAIN LOOP: refresh every 15 seconds unconditionally
@@ -156,9 +147,8 @@ async function doUpdateStatusBoard(client: Client): Promise<void> {
 
       if (isAtBottom) {
         await discordQueue.add(async () => {
-          await lastMsg!.edit({ embeds: [embed] });
+          await lastMsg!.edit({ embeds: [embed], allowedMentions: NO_MENTIONS });
         });
-        needsReanchor = false;
         return;
       }
 
@@ -182,13 +172,12 @@ async function doUpdateStatusBoard(client: Client): Promise<void> {
     }
   }
 
-  needsReanchor = false;
-
   try {
     const msg = await discordQueue.add(async () =>
       channel.send({
         embeds: [embed],
         flags: 4096,
+        allowedMentions: NO_MENTIONS,
       } as any)
     ) as Message | undefined;
 
@@ -237,7 +226,7 @@ function buildStatusEmbed(): EmbedBuilder {
   const sgDataStale = !!hasSg && (Date.now() / 1000 - sgCheckedAt) > SG_STALE_THRESHOLD_SEC;
   const sgLines: string[] = [];
   if (hasSg) {
-    const sorted = [...siteguard.data!.sites].sort((a, b) => a.domain.localeCompare(b.domain));
+    const sorted = [...siteguard.data!.sites].sort((a, b) => sgSiteLabel(a).localeCompare(sgSiteLabel(b)));
     for (const site of sorted) {
       sgLines.push(formatSiteLine(site, sgDataStale));
     }
@@ -368,11 +357,11 @@ function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, numbe
 
 function formatSiteLine(site: SgSite, dataStale: boolean): string {
   const emoji = sgStatusEmoji(site.status);
-  const responseMs = Math.round(site.response_time * 1000);
+  const responseMs = Math.round((site.response_time || 0) * 1000);
   const sslStr = site.ssl_expiry_days >= 0
-    ? dataStale ? `SSL: ~${site.ssl_expiry_days}d \u26A0` : `SSL: ${site.ssl_expiry_days}d`
+    ? dataStale || site.ssl_stale === true ? `SSL: ~${site.ssl_expiry_days}d \u26A0` : `SSL: ${site.ssl_expiry_days}d`
     : "";
-  const parts = [`${emoji} **${site.domain}**`, `${responseMs}ms`];
+  const parts = [`${emoji} **${sgSiteLabel(site)}**`, `${responseMs}ms`];
   if (sslStr) parts.push(sslStr);
   if (site.consecutive_failures > 1) parts.push(`\u{1F6A8} ${site.consecutive_failures} consecutive failures`);
   if (site.error) parts.push(`\u26A0 ${site.error}`);

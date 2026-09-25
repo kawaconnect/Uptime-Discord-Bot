@@ -1,0 +1,17 @@
+{
+  "request": "GET /wp-json/sgbackup/v1/health/ping",
+  "http_status": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.157469,
+  "body": {
+    "ok": true,
+    "site_url": "http://sgt-kp-s.test",
+    "version": "1.5.3",
+    "api_version": 2,
+    "time": 1790374074,
+    "key": {
+      "fp": "sgk-de75b9e5cb5b",
+      "source": "db"
+    }
+  }
+}

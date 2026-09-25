@@ -10,7 +10,13 @@ const envSchema = z.object({
     .default("")
     .transform((v) => v.split(",").map((s) => s.trim()).filter(Boolean)),
   PORT: z.coerce.number().default(3100),
-  LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
+  // Bearer token for the /debug/* endpoints. Unset = the endpoints are not
+  // served at all (404); /healthz and /readyz are always open for probes.
+  DEBUG_TOKEN: z.string().optional(),
+  // Key for encrypting secret settings stored via slash commands (SiteGuard
+  // API key, Zammad token, SMTP password) in data/bot.db. See db/secrets.ts.
+  SETTINGS_ENCRYPTION_KEY: z.string().optional(),
+  LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal", "silent"]).default("info"),
 
   // Uptime Kuma - connect via internal cluster URL to bypass auth proxy.
   // Username/password are optional - if Kuma has auth disabled (e.g. behind
@@ -18,6 +24,11 @@ const envSchema = z.object({
   KUMA_URL: z.string().min(1),
   KUMA_USERNAME: z.string().optional(),
   KUMA_PASSWORD: z.string().optional(),
+  // Full Authorization header value for reaching Kuma through Authentik
+  // (e.g. "Basic <base64 user:app-password>" for intercept_header_auth).
+  // Sent on the websocket upgrade (websocket-only transport when set);
+  // never logged. Kuma's own login stays disabled (auto-login).
+  KUMA_AUTH_HEADER: z.string().optional(),
 
   // SiteGuard Health Monitor - optional, bot works without it.
   // Set SG_HEALTH_URL to enable the WordPress health monitoring module.
@@ -75,6 +86,11 @@ export function loadEnv(): Env {
   }
   _env = result.data;
   return _env;
+}
+
+/** Drop the cached env so the next loadEnv() re-reads process.env (tests only). */
+export function resetEnvForTests(): void {
+  _env = null;
 }
 
 export function env(): Env {

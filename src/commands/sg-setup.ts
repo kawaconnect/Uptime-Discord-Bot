@@ -12,14 +12,12 @@ import {
 import { logger } from "../util/logger.js";
 import { setSetting, deleteSetting, getSetting } from "../db/index.js";
 import { env } from "../util/env.js";
-import { siteguard } from "../services/siteguard.js";
+import { isAdmin, ADMINS_ONLY } from "../util/admin.js";
+import { siteguard, classifySgError } from "../services/siteguard.js";
+import { checkSecureUrl } from "../util/url.js";
 import { startSgAlerts } from "../services/sgAlerts.js";
 import { getTicketConfig, testTicketing } from "../services/tickets.js";
 
-function isAdmin(userId: string): boolean {
-  const ids = env().ADMIN_USER_IDS;
-  return ids.length === 0 || ids.includes(userId);
-}
 
 export const sgSetupCommand = new SlashCommandBuilder()
   .setName("sg-setup")
@@ -96,7 +94,7 @@ export async function handleSgSetupCommand(
   interaction: ChatInputCommandInteraction
 ): Promise<void> {
   if (!isAdmin(interaction.user.id)) {
-    await interaction.reply({ content: "You are not authorised to use SG setup commands.", ephemeral: true });
+    await interaction.reply({ content: ADMINS_ONLY, ephemeral: true });
     return;
   }
 
@@ -231,74 +229,78 @@ async function handleSgConnect(interaction: ChatInputCommandInteraction) {
   const url = interaction.options.getString("url", true).trim();
   const apiKey = interaction.options.getString("api_key", true).trim();
 
-  // Validate URL format
-  try {
-    const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) {
-      await interaction.reply({ content: "URL must use http:// or https://", ephemeral: true });
-      return;
-    }
-  } catch {
-    await interaction.reply({ content: "Invalid URL format.", ephemeral: true });
+  // The API key goes out as a bearer token: https only (http for local dev hosts).
+  const checked = checkSecureUrl(url);
+  if (!checked.ok) {
+    await interaction.reply({ content: checked.error, ephemeral: true });
     return;
   }
 
   await interaction.deferReply({ ephemeral: true });
 
-  // Store in DB
-  setSetting("SG_HEALTH_URL", url);
-  setSetting("SG_HEALTH_API_KEY", apiKey);
-
-  // Test connection
+  // Test first, so a rejected key does not replace a working configuration.
+  let response: Response;
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 15_000);
-    const response = await fetch(url, {
+    response = await fetch(url, {
       headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
-      signal: controller.signal,
+      signal: AbortSignal.timeout(15_000),
     });
-    clearTimeout(timeout);
-
-    if (response.status === 401 || response.status === 403) {
-      await interaction.editReply(`\u274C **Authentication failed** (HTTP ${response.status}). Check the API key and try again.`);
-      deleteSetting("SG_HEALTH_URL");
-      deleteSetting("SG_HEALTH_API_KEY");
-      return;
-    }
-
-    if (!response.ok) {
-      await interaction.editReply(`\u26A0\uFE0F Connected but got HTTP ${response.status}. The endpoint may not be set up correctly. Config saved - will retry on next poll.`);
-    } else {
-      const data = await response.json() as any;
-      const siteCount = data.sites?.length ?? 0;
-      const version = data.version ?? "unknown";
-
-      // Start alert service first (idempotent), then start/restart the monitor,
-      // so even a failing first poll is alerted.
-      startSgAlerts(interaction.client);
-      siteguard.restart();
-
-      await interaction.editReply(
-        `\u2705 **Connected to SiteGuard!**\n\n` +
-        `**Endpoint:** ${url}\n` +
-        `**Version:** ${version}\n` +
-        `**Sites detected:** ${siteCount}\n` +
-        `**Overall status:** ${data.status?.toUpperCase() ?? "UNKNOWN"}\n\n` +
-        `Use \`/sg-setup alerts #channel\` for alerts. Status board is unified - use \`/setup status #channel\`.`
-      );
-    }
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
+    const msg = err instanceof Error ? (err.name === "TimeoutError" ? "Timeout after 15s" : err.message) : String(err);
+    saveAndStart(interaction, url, apiKey);
     await interaction.editReply(
       `\u26A0\uFE0F Could not reach the endpoint: ${msg}\n\n` +
-      `Config saved anyway - the bot will retry polling. Make sure the WordPress site is accessible from this server.`
+      `Config saved anyway - the bot is polling and will alert while it stays unreachable. Make sure the WordPress site is accessible from this server.`
     );
-    // Still restart with saved config; alerts are attached first so the
-    // ongoing unreachability is announced.
-    startSgAlerts(interaction.client);
-    siteguard.restart();
+    return;
   }
 
+  if (response.status === 401 || response.status === 403) {
+    await interaction.editReply(`\u274C **Authentication failed** (HTTP ${response.status}). Check the API key and try again. Nothing was changed.`);
+    return;
+  }
+
+  if (!response.ok) {
+    let body: unknown = null;
+    try { body = await response.json(); } catch { /* not JSON */ }
+    const err = classifySgError(response.status, body, response.statusText);
+    saveAndStart(interaction, url, apiKey);
+    await interaction.editReply(
+      `\u26A0\uFE0F Connected but SiteGuard answered: ${err.message}\n\n` +
+      `Config saved - the bot is polling and will report when it starts working.`
+    );
+    return;
+  }
+
+  let data: any = null;
+  try { data = await response.json(); } catch { /* handled below */ }
+  saveAndStart(interaction, url, apiKey);
+  if (!data || !Array.isArray(data.sites)) {
+    await interaction.editReply(
+      `\u26A0\uFE0F The endpoint answered HTTP ${response.status} but not with SiteGuard health data (no sites list). ` +
+      `Check the URL (it should end in /wp-json/sgbackup/v1/health). Config saved; the bot is polling.`
+    );
+    return;
+  }
+  await interaction.editReply(
+    `\u2705 **Connected to SiteGuard!**\n\n` +
+    `**Endpoint:** ${url}\n` +
+    `**Version:** ${data.version ?? "unknown"}\n` +
+    `**Sites detected:** ${data.sites.length}\n` +
+    `**Overall status:** ${String(data.status ?? "unknown").toUpperCase()}\n\n` +
+    `Use \`/sg-setup alerts #channel\` for alerts. Status board is unified - use \`/setup status #channel\`.`
+  );
+}
+
+/**
+ * Store the endpoint and (re)start polling. Alerts are attached first
+ * (idempotent), so even a failing first poll is announced.
+ */
+function saveAndStart(interaction: ChatInputCommandInteraction, url: string, apiKey: string): void {
+  setSetting("SG_HEALTH_URL", url);
+  setSetting("SG_HEALTH_API_KEY", apiKey);
+  startSgAlerts(interaction.client);
+  siteguard.restart();
   logger.info({ url }, "SG health endpoint configured via slash command");
 }
 
@@ -308,11 +310,11 @@ async function handleSgTickets(interaction: ChatInputCommandInteraction) {
   const group = interaction.options.getString("group")?.trim();
   const customer = interaction.options.getString("customer")?.trim();
 
-  try {
-    const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("bad protocol");
-  } catch {
-    await interaction.reply({ content: "Invalid Zammad URL.", ephemeral: true });
+  // The token goes out in an Authorization header: https only, except for
+  // local dev hosts and in-cluster service names.
+  const checked = checkSecureUrl(url, { allowClusterHttp: true });
+  if (!checked.ok) {
+    await interaction.reply({ content: `Zammad URL: ${checked.error}`, ephemeral: true });
     return;
   }
 

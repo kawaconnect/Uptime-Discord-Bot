@@ -19,6 +19,8 @@ import { logger } from "../util/logger.js";
 import { getSetting } from "../db/index.js";
 import { kuma, MonitorStatus, statusEmoji, type KumaMonitor, type KumaHeartbeat } from "./kuma.js";
 import { discordQueue } from "../queue/index.js";
+import { escapeHtml } from "../util/html.js";
+import { mentionsFor, NO_MENTIONS } from "../util/mentions.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 import { isPhoneEscalationEnabled, markDown, markUp, reportActive, trackedKeys } from "./phone.js";
 
@@ -207,13 +209,13 @@ async function sendDisconnectAlert(client: Client, reason: string): Promise<void
 
   const content = mention();
   await discordQueue.add(async () => {
-    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed], allowedMentions: mentionsFor(content) });
   });
   logger.warn("Sent disconnect alert");
 
   maybeEmail(
     "[DISCONNECTED] Uptime Kuma",
-    `<h2>Uptime Kuma Disconnected</h2><p>Lost connection for over 30 seconds.</p><p><b>Reason:</b> ${reason}</p>`
+    `<h2>Uptime Kuma Disconnected</h2><p>Lost connection for over 30 seconds.</p><p><b>Reason:</b> ${escapeHtml(reason)}</p>`
   );
 }
 
@@ -233,13 +235,13 @@ async function sendReconnectedAlert(client: Client): Promise<void> {
     .setTimestamp(new Date());
 
   await discordQueue.add(async () => {
-    await channel.send({ embeds: [embed] });
+    await channel.send({ embeds: [embed], allowedMentions: NO_MENTIONS });
   });
   logger.info("Sent reconnected alert");
 
   maybeEmail(
     "[RECONNECTED] Uptime Kuma",
-    `<h2>Uptime Kuma Reconnected</h2><p>Status: ${summary.up}/${summary.active} services up</p>`
+    `<h2>Uptime Kuma Reconnected</h2><p>Status: ${escapeHtml(summary.up)}/${escapeHtml(summary.active)} services up</p>`
   );
 }
 
@@ -265,13 +267,13 @@ async function sendStaleAlert(client: Client, stalenessMs: number): Promise<void
 
   const content = mention();
   await discordQueue.add(async () => {
-    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed], allowedMentions: mentionsFor(content) });
   });
   logger.warn({ stalenessMs, reconnectCount: kuma.reconnectCount }, "Sent stale data alert");
 
   maybeEmail(
     "[STALE DATA] Uptime Kuma",
-    `<h2>Monitoring Degraded - Data Stale</h2><p>No data for ${staleStr}. Reconnecting...</p>`
+    `<h2>Monitoring Degraded - Data Stale</h2><p>No data for ${escapeHtml(staleStr)}. Reconnecting...</p>`
   );
 }
 
@@ -292,13 +294,13 @@ async function sendStaleRecoveredAlert(client: Client): Promise<void> {
     .setTimestamp(new Date());
 
   await discordQueue.add(async () => {
-    await channel.send({ embeds: [embed] });
+    await channel.send({ embeds: [embed], allowedMentions: NO_MENTIONS });
   });
   logger.info("Sent stale data recovery alert");
 
   maybeEmail(
     "[RESTORED] Uptime Kuma Data Flow",
-    `<h2>Monitoring Restored</h2><p>Status: ${summary.up}/${summary.active} services up</p>`
+    `<h2>Monitoring Restored</h2><p>Status: ${escapeHtml(summary.up)}/${escapeHtml(summary.active)} services up</p>`
   );
 }
 
@@ -320,13 +322,13 @@ async function sendDownAlert(client: Client, monitor: KumaMonitor, heartbeat: Ku
 
   const content = mention();
   await discordQueue.add(async () => {
-    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed], allowedMentions: mentionsFor(content) });
   });
   logger.warn({ monitorId: monitor.id, name: monitor.name, msg: heartbeat.msg }, "Sent DOWN alert");
 
   maybeEmail(
     `[DOWN] ${monitor.name}`,
-    `<h2>${monitor.name} is DOWN</h2><p><b>Type:</b> ${monitor.type}</p><p><b>Target:</b> ${target}</p><p><b>Error:</b> ${heartbeat.msg || "No details"}</p>`
+    `<h2>${escapeHtml(monitor.name)} is DOWN</h2><p><b>Type:</b> ${escapeHtml(monitor.type)}</p><p><b>Target:</b> ${escapeHtml(target)}</p><p><b>Error:</b> ${escapeHtml(heartbeat.msg || "No details")}</p>`
   );
 }
 
@@ -346,12 +348,12 @@ async function sendRecoveryAlert(client: Client, monitor: KumaMonitor, heartbeat
     .setTimestamp(new Date(heartbeat.time));
 
   await discordQueue.add(async () => {
-    await channel.send({ embeds: [embed] });
+    await channel.send({ embeds: [embed], allowedMentions: NO_MENTIONS });
   });
   logger.info({ monitorId: monitor.id, name: monitor.name }, "Sent recovery alert");
 
   maybeEmail(
     `[RECOVERED] ${monitor.name}`,
-    `<h2>${monitor.name} is back UP</h2><p><b>Response:</b> ${heartbeat.msg || "OK"}${ping}</p>`
+    `<h2>${escapeHtml(monitor.name)} is back UP</h2><p><b>Response:</b> ${escapeHtml(heartbeat.msg || "OK")}${escapeHtml(ping)}</p>`
   );
 }

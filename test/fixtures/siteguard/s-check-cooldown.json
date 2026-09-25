@@ -1,0 +1,13 @@
+{
+  "request": "POST /wp-json/sgbackup/v1/health/check",
+  "http_status": 429,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.164216,
+  "body": {
+    "code": "cooldown",
+    "message": "On-demand health check is on cooldown. Poll GET /health for cached data or retry in a few seconds.",
+    "data": {
+      "status": 429
+    }
+  }
+}

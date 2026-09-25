@@ -8,10 +8,11 @@
 # The workflow rules and stages (test, build, release) come from the shared
 # template.
 #
-# The test stage type-checks and compiles the bot on the same Node the
-# Dockerfile uses; the image only builds once that passes. There is no test
-# suite in the repo, so the check also loads the compiled better-sqlite3
-# native binding, the one dependency that can fail to install on Alpine.
+# The test stage audits dependencies, type-checks, lints, runs the test suite
+# (including the SiteGuard fixture replay) and compiles the bot on the same
+# Node the Dockerfile uses; the image only builds once that passes. The smoke
+# script also loads the compiled better-sqlite3 native binding, the one
+# dependency that can fail to install on Alpine.
 
 include:
   - project: dean/ci-templates
@@ -33,7 +34,11 @@ check:
     - node --version
     # npm ci installs exactly package-lock.json, as the Dockerfile does.
     - npm ci --no-audit --no-fund --cache .npm --prefer-offline
+    # Fails the release on a high/critical advisory (the repo is kept at 0).
+    - npm audit --audit-level=high
     - npm run typecheck
+    - npm run lint
+    - npm test
     - npm run build
     - sh ci/smoke.sh
 

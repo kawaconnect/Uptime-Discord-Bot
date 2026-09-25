@@ -1,0 +1,13 @@
+{
+  "request": "GET /wp-json/sgbackup/v1/health/ping",
+  "http_status": 404,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.024314,
+  "body": {
+    "code": "disabled",
+    "message": "Health monitor is not enabled",
+    "data": {
+      "status": 404
+    }
+  }
+}

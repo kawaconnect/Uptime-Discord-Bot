@@ -19,6 +19,8 @@
 import { Client, EmbedBuilder, TextChannel } from "discord.js";
 import { logger } from "../util/logger.js";
 import { getSetting, getSettingOrEnv } from "../db/index.js";
+import { escapeHtml } from "../util/html.js";
+import { NO_MENTIONS } from "../util/mentions.js";
 import { onPhoneAcknowledged, PhoneAck, downSince } from "./phone.js";
 import { closeIncidentTicketOnAck, closeMatchingTickets, ticketUrl, isTicketingConfigured } from "./tickets.js";
 import { kuma } from "./kuma.js";
@@ -71,15 +73,12 @@ async function post(client: Client, embed: EmbedBuilder): Promise<void> {
   if (!channelId) return;
   try {
     const channel = (await client.channels.fetch(channelId)) as TextChannel | null;
-    if (channel?.isTextBased()) await channel.send({ embeds: [embed] });
+    if (channel?.isTextBased()) await channel.send({ embeds: [embed], allowedMentions: NO_MENTIONS });
   } catch (err) {
     logger.warn({ err }, "Failed to post acknowledgement notice");
   }
 }
 
-function escapeHtml(s: string): string {
-  return s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
-}
 
 function escapeMd(s: string): string {
   return s.replace(/[*_`~]/g, "\\$&");

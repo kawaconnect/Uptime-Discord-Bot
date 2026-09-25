@@ -20,14 +20,8 @@ import {
   isPhoneEscalationEnabled,
 } from "../services/phone.js";
 import { getSettingOrEnv } from "../db/index.js";
-import { env } from "../util/env.js";
+import { isAdmin, ADMINS_ONLY } from "../util/admin.js";
 
-// Same rule as /setup, /sg-setup and /sg-pause: an empty ADMIN_USER_IDS
-// allows everyone who can see the command.
-function isAdmin(userId: string): boolean {
-  const ids = env().ADMIN_USER_IDS;
-  return ids.length === 0 || ids.includes(userId);
-}
 
 const kindChoices = (Object.keys(CALL_KINDS) as CallKind[]).map((k) => ({
   name: CALL_KINDS[k],
@@ -70,7 +64,7 @@ export async function handlePhoneCommand(
     // restricted to admins (same rule as /setup, /sg-setup and /sg-pause).
     if (!isAdmin(interaction.user.id)) {
       await interaction.reply({
-        content: "You are not permitted to change phone escalation settings.",
+        content: ADMINS_ONLY,
         ephemeral: true,
       });
       return;

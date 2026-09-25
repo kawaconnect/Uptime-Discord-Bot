@@ -1,0 +1,13 @@
+{
+  "request": "GET /wp-json/sgbackup/v1/health",
+  "http_status": 403,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.200073,
+  "body": {
+    "code": "forbidden",
+    "message": "Invalid API key",
+    "data": {
+      "status": 403
+    }
+  }
+}

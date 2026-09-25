@@ -14,6 +14,7 @@ import nodemailer from "nodemailer";
 import type { Transporter } from "nodemailer";
 import { logger } from "../util/logger.js";
 import { getSetting } from "../db/index.js";
+import { escapeHtml } from "../util/html.js";
 
 export interface SmtpConfig {
   host: string;
@@ -142,6 +143,6 @@ export async function sendTestEmail(): Promise<void> {
 <p>This is a test email from the Uptime Discord Bot.</p>
 <p>If you received this, your SMTP settings are working correctly.</p>
 <hr>
-<p><small>Host: ${currentConfig.host}:${currentConfig.port} | From: ${currentConfig.from}</small></p>`,
+<p><small>Host: ${escapeHtml(currentConfig.host)}:${escapeHtml(currentConfig.port)} | From: ${escapeHtml(currentConfig.from)}</small></p>`,
   });
 }

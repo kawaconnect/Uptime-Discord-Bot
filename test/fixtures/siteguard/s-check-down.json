@@ -1,0 +1,59 @@
+{
+  "request": "POST /wp-json/sgbackup/v1/health/check",
+  "http_status": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.679236,
+  "body": {
+    "status": "down",
+    "site_url": "http://sgt-kp-s.test",
+    "checked_at": 1790374080,
+    "ssl_checked_at": 0,
+    "check_interval": 600,
+    "check_interval_label": "every10min",
+    "ssl_warn_days": 14,
+    "summary": {
+      "total": 1,
+      "operational": 0,
+      "degraded": 0,
+      "down": 1,
+      "unknown": 0,
+      "ssl_ok": 0,
+      "ssl_failing": 0,
+      "ssl_stale": 0,
+      "ssl_expiring_soon": 0,
+      "ssl_expired": 0
+    },
+    "alerts": [
+      {
+        "severity": "critical",
+        "type": "site_down",
+        "domain": "sgt-kp-s.test",
+        "message": "sgt-kp-s.test is DOWN: HTTP 503 (3 consecutive failures)",
+        "site_id": 1
+      }
+    ],
+    "sites": [
+      {
+        "site_id": 1,
+        "url": "http://sgt-kp-s.test/",
+        "domain": "sgt-kp-s.test",
+        "status": "down",
+        "http_code": 503,
+        "response_time": 0.008,
+        "ssl_expiry_days": -1,
+        "ssl_issuer": "",
+        "ssl_ok": false,
+        "ssl_error": "",
+        "ssl_stale": false,
+        "ssl_last_success": 0,
+        "ssl_checked_at": 0,
+        "last_check": 1790374080,
+        "error": "HTTP 503",
+        "check_method": "external_fallback",
+        "consecutive_failures": 3
+      }
+    ],
+    "version": "1.5.3",
+    "api_version": 2
+  }
+}

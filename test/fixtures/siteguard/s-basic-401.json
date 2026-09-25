@@ -1,0 +1,13 @@
+{
+  "request": "GET /wp-json/sgbackup/v1/health",
+  "http_status": 401,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.154859,
+  "body": {
+    "code": "unauthorized",
+    "message": "Missing or invalid Authorization header",
+    "data": {
+      "status": 401
+    }
+  }
+}

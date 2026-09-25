@@ -12,7 +12,7 @@
  * in statusBoard.ts also triggers reconnects when heartbeats go stale.
  */
 
-import { io, Socket } from "socket.io-client";
+import { io, Socket, type ManagerOptions, type SocketOptions } from "socket.io-client";
 import { EventEmitter } from "node:events";
 import { env } from "../util/env.js";
 import { logger } from "../util/logger.js";
@@ -125,6 +125,41 @@ const MONITOR_REFRESH_INTERVAL_MS = 5 * 60_000; // 5 minutes
 // Client
 // ---------------------------------------------------------------
 
+/**
+ * Socket.IO options for the Kuma connection.
+ *
+ * When Kuma sits behind Authentik (Kuma's own login disabled, Authentik is
+ * the gate), KUMA_AUTH_HEADER holds the full Authorization header value
+ * (Authentik's intercept_header_auth takes "Basic <base64 user:app-password>").
+ * It is sent on the websocket upgrade (in Node, engine.io-client passes
+ * extraHeaders to the ws handshake). With a header set the bot uses the
+ * websocket transport only, the path verified through the Authentik outpost
+ * (long-polling through it is untested). Without a header (in-cluster URL)
+ * websocket falls back to polling as before. The value is never logged.
+ */
+export function kumaSocketOptions(authHeader: string | undefined): Partial<ManagerOptions & SocketOptions> {
+  const header = authHeader?.trim();
+  return {
+    reconnection: true,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 30000,
+    timeout: 10000,
+    transports: header ? ["websocket"] : ["websocket", "polling"],
+    ...(header ? { extraHeaders: { Authorization: header } } : {}),
+  };
+}
+
+/** URL for logs, without any user:password part. */
+function redactUrl(raw: string): string {
+  try {
+    const u = new URL(raw);
+    if (u.username || u.password) { u.username = "***"; u.password = ""; }
+    return u.toString();
+  } catch {
+    return "(invalid URL)";
+  }
+}
+
 class KumaClient extends EventEmitter {
   private socket: Socket | null = null;
   private _monitors = new Map<number, KumaMonitor>();
@@ -210,15 +245,9 @@ class KumaClient extends EventEmitter {
   connect(): void {
     const config = env();
     const url = config.KUMA_URL;
-    logger.info({ url }, "Connecting to Uptime Kuma");
+    logger.info({ url: redactUrl(url), authHeader: !!config.KUMA_AUTH_HEADER?.trim() }, "Connecting to Uptime Kuma");
 
-    this.socket = io(url, {
-      reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 30000,
-      timeout: 10000,
-      transports: ["websocket", "polling"],
-    });
+    this.socket = io(url, kumaSocketOptions(config.KUMA_AUTH_HEADER));
 
     // Log ALL socket events for debugging
     this.socket.onAny((event: string, ...args: unknown[]) => {

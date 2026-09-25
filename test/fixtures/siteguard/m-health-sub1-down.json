@@ -1,0 +1,97 @@
+{
+  "request": "GET /wp-json/sgbackup/v1/health",
+  "http_status": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.166576,
+  "body": {
+    "status": "down",
+    "site_url": "http://sgt-kp-m.test",
+    "checked_at": 1790374094,
+    "ssl_checked_at": 0,
+    "check_interval": 600,
+    "check_interval_label": "every10min",
+    "ssl_warn_days": 14,
+    "summary": {
+      "total": 3,
+      "operational": 2,
+      "degraded": 0,
+      "down": 1,
+      "unknown": 0,
+      "ssl_ok": 0,
+      "ssl_failing": 0,
+      "ssl_stale": 0,
+      "ssl_expiring_soon": 0,
+      "ssl_expired": 0
+    },
+    "alerts": [
+      {
+        "severity": "critical",
+        "type": "site_down",
+        "domain": "sgt-kp-m.test",
+        "message": "sgt-kp-m.test is DOWN: HTTP 503",
+        "site_id": 2
+      }
+    ],
+    "sites": [
+      {
+        "site_id": 1,
+        "url": "http://sgt-kp-m.test/",
+        "domain": "sgt-kp-m.test",
+        "status": "operational",
+        "http_code": 200,
+        "response_time": 0.029,
+        "ssl_expiry_days": -1,
+        "ssl_issuer": "",
+        "ssl_ok": false,
+        "ssl_error": "",
+        "ssl_stale": false,
+        "ssl_last_success": 0,
+        "ssl_checked_at": 0,
+        "last_check": 1790374094,
+        "error": "",
+        "check_method": "external_fallback",
+        "consecutive_failures": 0
+      },
+      {
+        "site_id": 2,
+        "url": "http://sgt-kp-m.test/sub1/",
+        "domain": "sgt-kp-m.test",
+        "status": "down",
+        "http_code": 503,
+        "response_time": 0.01,
+        "ssl_expiry_days": -1,
+        "ssl_issuer": "",
+        "ssl_ok": false,
+        "ssl_error": "",
+        "ssl_stale": false,
+        "ssl_last_success": 0,
+        "ssl_checked_at": 0,
+        "last_check": 1790374094,
+        "error": "HTTP 503",
+        "check_method": "external_fallback",
+        "consecutive_failures": 1
+      },
+      {
+        "site_id": 3,
+        "url": "http://sgt-kp-m.test/sub2/",
+        "domain": "sgt-kp-m.test",
+        "status": "operational",
+        "http_code": 200,
+        "response_time": 0.025,
+        "ssl_expiry_days": -1,
+        "ssl_issuer": "",
+        "ssl_ok": false,
+        "ssl_error": "",
+        "ssl_stale": false,
+        "ssl_last_success": 0,
+        "ssl_checked_at": 0,
+        "last_check": 1790374094,
+        "error": "",
+        "check_method": "external_fallback",
+        "consecutive_failures": 0
+      }
+    ],
+    "version": "1.5.3",
+    "api_version": 2
+  }
+}

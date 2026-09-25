@@ -6,7 +6,12 @@
  * - Site recovers (UP after DOWN)
  * - SSL certificate expiring soon
  * - WordPress endpoint unreachable (@everyone by default)
+ * - SiteGuard answering but refusing the bot (monitor disabled, API key
+ *   rejected, IP rate-limited, route missing): one notice without @everyone,
+ *   email or ticket, since WordPress is up and the fix is configuration; the
+ *   bot's direct probe keeps watching the sites meanwhile
  * - WordPress endpoint reachable again
+ * - SSL probe failures reported by SiteGuard (one notice per site)
  * - Health data stale (endpoint answers but WP cron has not checked sites)
  * - Repeat reminders while sites stay down / WordPress stays unreachable
  *
@@ -30,7 +35,16 @@ import {
 import { logger } from "../util/logger.js";
 import { env } from "../util/env.js";
 import { getSetting, setSetting } from "../db/index.js";
-import { siteguard, sgStatusEmoji, type SgSite } from "./siteguard.js";
+import {
+  siteguard,
+  sgStatusEmoji,
+  sgSiteLabel,
+  isConfigErrorKind,
+  type SgSite,
+  type SgErrorKind,
+} from "./siteguard.js";
+import { escapeHtml } from "../util/html.js";
+import { mentionsFor } from "../util/mentions.js";
 import { discordQueue } from "../queue/index.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 import {
@@ -134,6 +148,8 @@ const sslExpiring = new Map<number, SgSite>();
  *  not ring a phone every cooldown window until someone renews it. */
 const sslEscalated = new Set<number>();
 let dataStaleSince: number | null = null;
+/** Error kind of the current "unreachable" incident ("" when reachable). */
+let unreachableKind: SgErrorKind | "" = "";
 
 async function getSgAlertChannel(client: Client): Promise<TextChannel | null> {
   // Dedicated SG channel → Kuma alert channel → status board channel.
@@ -187,7 +203,7 @@ async function post(client: Client, embed: EmbedBuilder, withMention: boolean): 
   if (!channel) return false;
   const content = withMention ? mention() : "";
   await discordQueue.add(async () => {
-    await channel.send({ ...(content ? { content } : {}), embeds: [embed] });
+    await channel.send({ ...(content ? { content } : {}), embeds: [embed], allowedMentions: mentionsFor(content) });
   });
   return true;
 }
@@ -205,7 +221,7 @@ export function startSgAlerts(client: Client): void {
     markDown(`sg:site:${site.site_id}`);
     if (!isSgEnabled("SITE_DOWN")) return;
     sendSiteDownAlert(client, site).catch((err) =>
-      logger.error({ err, domain: site.domain }, "Failed to send SG site down alert")
+      logger.error({ err, site: sgSiteLabel(site) }, "Failed to send SG site down alert")
     );
   });
 
@@ -218,7 +234,7 @@ export function startSgAlerts(client: Client): void {
     sslEscalated.delete(site.site_id);
     if (!isSgEnabled("SITE_RECOVERY")) return;
     sendSiteRecoveryAlert(client, site).catch((err) =>
-      logger.error({ err, domain: site.domain }, "Failed to send SG recovery alert")
+      logger.error({ err, site: sgSiteLabel(site) }, "Failed to send SG recovery alert")
     );
   });
 
@@ -228,25 +244,36 @@ export function startSgAlerts(client: Client): void {
     markDown(`sg:ssl:${site.site_id}`);
     if (!isSgEnabled("SSL_EXPIRING")) return;
     sendSslExpiringAlert(client, site).catch((err) =>
-      logger.error({ err, domain: site.domain }, "Failed to send SG SSL alert")
+      logger.error({ err, site: sgSiteLabel(site) }, "Failed to send SG SSL alert")
     );
   });
 
   // ---- WordPress unreachable ----
-  siteguard.on("unreachable", (errorMsg: string) => {
-    markDown("sg:unreachable");
+  siteguard.on("unreachable", (errorMsg: string, kind: SgErrorKind | "" = "") => {
+    unreachableKind = kind;
+    if (!isConfigErrorKind(kind)) markDown("sg:unreachable");
     if (!isSgEnabled("WP_UNREACHABLE")) return;
-    sendUnreachableAlert(client, errorMsg).catch((err) =>
+    sendUnreachableAlert(client, errorMsg, kind).catch((err) =>
       logger.error({ err }, "Failed to send SG unreachable alert")
     );
   });
 
   // ---- WordPress reachable again ----
-  siteguard.on("reachable", () => {
+  siteguard.on("reachable", (previousKind: SgErrorKind | "" = "") => {
+    unreachableKind = "";
     markUp("sg:unreachable").catch(() => undefined);
     lastSentAt.delete("unreachable");
-    sendReachableAlert(client).catch((err) =>
+    if (isSgPaused()) return;
+    sendReachableAlert(client, previousKind).catch((err) =>
       logger.error({ err }, "Failed to send SG reachable alert")
+    );
+  });
+
+  // ---- SSL probe failed (SiteGuard could not read the certificate) ----
+  siteguard.on("sslProbeFailed", (site: SgSite, message: string) => {
+    if (!isSgEnabled("SSL_EXPIRING")) return;
+    sendSslProbeFailedAlert(client, site, message).catch((err) =>
+      logger.error({ err, site: sgSiteLabel(site) }, "Failed to send SG SSL probe alert")
     );
   });
 
@@ -292,7 +319,7 @@ async function reportDownSitesToPbx(): Promise<void> {
   for (const site of downSites.values()) {
     const key = `sg:site:${site.site_id}`;
     markDown(key);
-    const name = site.domain || `site ${site.site_id}`;
+    const name = sgSiteLabel(site) || `site ${site.site_id}`;
     await reportActive(key, `Web site ${name} is down.`, "uptime", "sg-site-down");
   }
 
@@ -300,7 +327,7 @@ async function reportDownSitesToPbx(): Promise<void> {
     if (sslEscalated.has(site.site_id)) continue;
     const key = `sg:ssl:${site.site_id}`;
     markDown(key);
-    const name = site.domain || `site ${site.site_id}`;
+    const name = sgSiteLabel(site) || `site ${site.site_id}`;
     await reportActive(key, `S S L certificate for ${name} is expiring soon.`, "uptime", "sg-ssl");
     sslEscalated.add(site.site_id);
     await markUp(key).catch(() => undefined);
@@ -330,15 +357,18 @@ export function stopSgAlerts(): void {
 /**
  * Re-announce ongoing incidents every `repeatMinutes()` so an outage cannot
  * scroll past as a single message. Also keeps the ticket annotated.
+ * Exported for tests; runs on the reminder tick.
  */
-async function runReminders(client: Client): Promise<void> {
+export async function runReminders(client: Client): Promise<void> {
   const every = repeatMinutes();
   if (!isSgEnabled("REPEAT") || every <= 0) return;
   const everyMs = every * 60_000;
   const now = Date.now();
 
   // WordPress unreachable
-  if (!siteguard.reachable && siteguard.unreachableSince > 0) {
+  // Configuration problems (monitor disabled, key rejected, rate-limited) are
+  // announced once and not repeated: WordPress is up and nobody needs paging.
+  if (!siteguard.reachable && siteguard.unreachableSince > 0 && !isConfigErrorKind(unreachableKind)) {
     const last = lastSentAt.get("unreachable") ?? siteguard.unreachableSince;
     if (now - last >= everyMs) {
       lastSentAt.set("unreachable", now);
@@ -355,7 +385,7 @@ async function runReminders(client: Client): Promise<void> {
         .setTimestamp(new Date());
       await post(client, embed, true);
       logger.warn({ downFor: dur }, "Sent SG unreachable REMINDER");
-      void maybeEmail(`[STILL UNREACHABLE ${dur}] WordPress Health Endpoint`, `<h2>WordPress still unreachable (${dur})</h2><p>${siteguard.lastError}</p>`);
+      void maybeEmail(`[STILL UNREACHABLE ${dur}] WordPress Health Endpoint`, `<h2>WordPress still unreachable (${escapeHtml(dur)})</h2><p>${escapeHtml(siteguard.lastError)}</p>`);
       if (isTicketsEnabled()) {
         await noteIncidentTicket("sg:unreachable", `<p>Still unreachable after ${dur}. Last error: ${escapeHtml(siteguard.lastError)}</p>`);
       }
@@ -378,8 +408,8 @@ async function runReminders(client: Client): Promise<void> {
     if (oldest > 0 && now - oldest < everyMs) return;
 
     const lines = [...downSites.values()]
-      .sort((a, b) => a.domain.localeCompare(b.domain))
-      .map((s) => `${sgStatusEmoji("down")} **${s.domain}** - ${s.error || `HTTP ${s.http_code || "?"}`} (${s.consecutive_failures ?? "?"} consecutive failures)`);
+      .sort((a, b) => sgSiteLabel(a).localeCompare(sgSiteLabel(b)))
+      .map((s) => `${sgStatusEmoji("down")} **${sgSiteLabel(s)}** - ${s.error || `HTTP ${s.http_code || "?"}`} (${s.consecutive_failures ?? "?"} consecutive failures)`);
     const embed = new EmbedBuilder()
       .setTitle(`\u{1F534} ${downSites.size} SITE${downSites.size > 1 ? "S" : ""} STILL DOWN`)
       .setDescription(lines.join("\n") + `\n\nThis reminder repeats every ${every} min until the site${downSites.size > 1 ? "s" : ""} recover.`)
@@ -388,26 +418,24 @@ async function runReminders(client: Client): Promise<void> {
     await post(client, embed, true);
     for (const id of downSites.keys()) lastSentAt.set(`site:${id}`, now);
     logger.warn({ count: downSites.size }, "Sent SG sites-down REMINDER");
-    void maybeEmail(`[STILL DOWN] ${downSites.size} site(s)`, `<h2>${downSites.size} site(s) still down</h2><ul>${[...downSites.values()].map((s) => `<li>${escapeHtml(s.domain)} - ${escapeHtml(s.error || String(s.http_code))}</li>`).join("")}</ul>`);
+    void maybeEmail(`[STILL DOWN] ${downSites.size} site(s)`, `<h2>${downSites.size} site(s) still down</h2><ul>${[...downSites.values()].map((s) => `<li>${escapeHtml(sgSiteLabel(s))} - ${escapeHtml(s.error || String(s.http_code))}</li>`).join("")}</ul>`);
     if (isTicketsEnabled()) {
       for (const s of downSites.values()) {
-        await noteIncidentTicket(`sg:site:${s.site_id}`, `<p>${escapeHtml(s.domain)} still down (${s.consecutive_failures ?? "?"} consecutive failures). Error: ${escapeHtml(s.error || String(s.http_code))}</p>`);
+        await noteIncidentTicket(`sg:site:${s.site_id}`, `<p>${escapeHtml(sgSiteLabel(s))} still down (${escapeHtml(s.consecutive_failures ?? "?")} consecutive failures). Error: ${escapeHtml(s.error || String(s.http_code))}</p>`);
       }
     }
   }
 }
 
-function escapeHtml(s: string): string {
-  return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c] as string));
-}
 
 async function sendSiteDownAlert(client: Client, site: SgSite): Promise<void> {
   lastSentAt.set(`site:${site.site_id}`, Date.now());
   const source = site.check_method === "bot-direct" ? "bot direct probe" : "SiteGuard (WordPress)";
+  const label = sgSiteLabel(site);
 
   // Discord first - it is the fastest path - then helpdesk (email → API fallback).
   const embed = new EmbedBuilder()
-    .setTitle(`${sgStatusEmoji("down")} ${site.domain} is DOWN`)
+    .setTitle(`${sgStatusEmoji("down")} ${label} is DOWN`)
     .setDescription(
       `**URL:** ${site.url}\n` +
       `**HTTP Code:** ${site.http_code || "N/A"}\n` +
@@ -421,31 +449,41 @@ async function sendSiteDownAlert(client: Client, site: SgSite): Promise<void> {
     .setTimestamp(new Date((site.last_check || Math.floor(Date.now() / 1000)) * 1000));
 
   const sent = await post(client, embed, true);
-  logger.warn({ domain: site.domain, error: site.error, sent, source }, "SG site DOWN alert");
+  logger.warn({ site: label, error: site.error, sent, source }, "SG site DOWN alert");
 
   const ticketLine = await deliverIncident(
     `sg:site:${site.site_id}`,
-    `[DOWN] ${site.domain}`,
-    `<h2>${escapeHtml(site.domain)} is DOWN</h2><p><b>URL:</b> ${escapeHtml(site.url)}</p><p><b>HTTP Code:</b> ${site.http_code || "N/A"}</p><p><b>Error:</b> ${escapeHtml(site.error || "No response")}</p><p><b>Consecutive Failures:</b> ${site.consecutive_failures ?? 1}</p><p><b>Detected by:</b> ${source}</p><p>Opened automatically by the uptime bot.</p>`
+    `[DOWN] ${label}`,
+    `<h2>${escapeHtml(label)} is DOWN</h2><p><b>URL:</b> ${escapeHtml(site.url)}</p><p><b>HTTP Code:</b> ${escapeHtml(site.http_code || "N/A")}</p><p><b>Error:</b> ${escapeHtml(site.error || "No response")}</p><p><b>Consecutive Failures:</b> ${escapeHtml(site.consecutive_failures ?? 1)}</p><p><b>Detected by:</b> ${escapeHtml(source)}</p><p>Opened automatically by the uptime bot.</p>`
   );
-  if (ticketLine) {
-    const follow = new EmbedBuilder().setDescription(`${site.domain}: ${ticketLine.trim()}`).setColor(ticketLine.includes("\u26A0") ? 0xe67e22 : 0x95a5a6);
-    await post(client, follow, ticketLine.includes("\u26A0"));
-  }
+  await postTicketFollowUp(client, label, ticketLine);
+}
+
+/**
+ * Where the incident ticket went, as a follow-up to the alert. Never pings:
+ * the alert itself already did, and a second @everyone per incident (e.g.
+ * "no SMTP configured") is noise.
+ */
+async function postTicketFollowUp(client: Client, subject: string, ticketLine: string): Promise<void> {
+  if (!ticketLine) return;
+  const warn = ticketLine.includes("\u26A0");
+  const follow = new EmbedBuilder().setDescription(`${subject}: ${ticketLine.trim()}`).setColor(warn ? 0xe67e22 : 0x95a5a6);
+  await post(client, follow, false);
 }
 
 async function sendSiteRecoveryAlert(client: Client, site: SgSite): Promise<void> {
+  const label = sgSiteLabel(site);
   let ticketLine = "";
   if (isTicketingConfigured()) {
     const rec = await resolveIncidentTicket(
       `sg:site:${site.site_id}`,
-      `<p>${escapeHtml(site.domain)} is back UP (HTTP ${site.http_code}, ${Math.round((site.response_time || 0) * 1000)}ms). Resolved automatically by the uptime bot.</p>`
+      `<p>${escapeHtml(label)} is back UP (HTTP ${escapeHtml(site.http_code)}, ${Math.round((site.response_time || 0) * 1000)}ms). Resolved automatically by the uptime bot.</p>`
     );
     if (rec) ticketLine = `\n**Ticket:** #${rec.number} resolved`;
   }
 
   const embed = new EmbedBuilder()
-    .setTitle(`${sgStatusEmoji("operational")} ${site.domain} is back UP`)
+    .setTitle(`${sgStatusEmoji("operational")} ${label} is back UP`)
     .setDescription(
       `**URL:** ${site.url}\n` +
       `**HTTP Code:** ${site.http_code}\n` +
@@ -457,17 +495,18 @@ async function sendSiteRecoveryAlert(client: Client, site: SgSite): Promise<void
     .setTimestamp(new Date((site.last_check || Math.floor(Date.now() / 1000)) * 1000));
 
   await post(client, embed, false);
-  logger.info({ domain: site.domain }, "Sent SG recovery alert");
+  logger.info({ site: label }, "Sent SG recovery alert");
 
   void maybeEmail(
-    `[RECOVERED] ${site.domain}`,
-    `<h2>${escapeHtml(site.domain)} is back UP</h2><p><b>Response Time:</b> ${Math.round((site.response_time || 0) * 1000)}ms</p>`
+    `[RECOVERED] ${label}`,
+    `<h2>${escapeHtml(label)} is back UP</h2><p><b>Response Time:</b> ${Math.round((site.response_time || 0) * 1000)}ms</p>`
   );
 }
 
 async function sendSslExpiringAlert(client: Client, site: SgSite): Promise<void> {
+  const label = sgSiteLabel(site);
   const embed = new EmbedBuilder()
-    .setTitle(`⚠️ SSL Certificate Expiring - ${site.domain}`)
+    .setTitle(`\u26A0\uFE0F SSL Certificate Expiring - ${label}`)
     .setDescription(
       `**URL:** ${site.url}\n` +
       `**Days Remaining:** ${site.ssl_expiry_days}\n` +
@@ -478,17 +517,78 @@ async function sendSslExpiringAlert(client: Client, site: SgSite): Promise<void>
     .setTimestamp(new Date());
 
   await post(client, embed, false);
-  logger.warn({ domain: site.domain, daysLeft: site.ssl_expiry_days }, "Sent SG SSL expiring alert");
+  logger.warn({ site: label, daysLeft: site.ssl_expiry_days }, "Sent SG SSL expiring alert");
 
   void maybeEmail(
-    `[SSL EXPIRING] ${site.domain} - ${site.ssl_expiry_days} days left`,
-    `<h2>SSL Certificate Expiring - ${escapeHtml(site.domain)}</h2><p><b>Days Remaining:</b> ${site.ssl_expiry_days}</p><p><b>Issuer:</b> ${escapeHtml(site.ssl_issuer || "Unknown")}</p><p>Renew the certificate before it expires.</p>`
+    `[SSL EXPIRING] ${label} - ${site.ssl_expiry_days} days left`,
+    `<h2>SSL Certificate Expiring - ${escapeHtml(label)}</h2><p><b>Days Remaining:</b> ${escapeHtml(site.ssl_expiry_days)}</p><p><b>Issuer:</b> ${escapeHtml(site.ssl_issuer || "Unknown")}</p><p>Renew the certificate before it expires.</p>`
   );
 }
 
-async function sendUnreachableAlert(client: Client, errorMsg: string): Promise<void> {
+/** One Discord notice (no @everyone, email or ticket): SiteGuard could not read the certificate. */
+async function sendSslProbeFailedAlert(client: Client, site: SgSite, message: string): Promise<void> {
+  const label = sgSiteLabel(site);
+  const last = Number(site.ssl_last_success) > 0 ? `<t:${Number(site.ssl_last_success)}:R>` : "never";
+  const embed = new EmbedBuilder()
+    .setTitle(`\u26A0\uFE0F SSL Check Failing - ${label}`)
+    .setDescription(
+      `SiteGuard could not read the certificate, so its expiry is not being checked.\n\n` +
+      `**URL:** ${site.url}\n` +
+      `**Error:** ${(message || site.ssl_error || "unknown").slice(0, 500)}\n` +
+      `**Last successful check:** ${last}`
+    )
+    .setColor(0xf39c12)
+    .setTimestamp(new Date());
+  await post(client, embed, false);
+  logger.warn({ site: label, message }, "Sent SG SSL probe failure notice");
+}
+
+const CONFIG_ERROR_TEXT: Record<string, { title: string; lead: string; fix: string }> = {
+  disabled: {
+    title: "\u26A0\uFE0F SITEGUARD HEALTH MONITOR DISABLED",
+    lead: "WordPress answers, but SiteGuard's health monitor is switched off.",
+    fix: "Enable it in SiteGuard \u2192 Health, or `/sg-setup disconnect` if this is intended.",
+  },
+  auth: {
+    title: "\u26A0\uFE0F SITEGUARD REJECTED THE BOT'S API KEY",
+    lead: "WordPress answers, but no longer accepts the bot's API key.",
+    fix: "Copy the current key from SiteGuard \u2192 Health and run `/sg-setup connect` again.",
+  },
+  rate_limited: {
+    title: "\u26A0\uFE0F SITEGUARD IS RATE-LIMITING THE BOT",
+    lead: "WordPress answers, but blocks this IP after too many failed key attempts.",
+    fix: "Check the API key (`/sg-setup connect`); the block clears by itself.",
+  },
+  not_found: {
+    title: "\u26A0\uFE0F SITEGUARD HEALTH ROUTE NOT FOUND",
+    lead: "WordPress answers, but the SiteGuard health route does not exist.",
+    fix: "Check that the SiteGuard plugin is active and the endpoint URL is right.",
+  },
+};
+
+async function sendUnreachableAlert(client: Client, errorMsg: string, kind: SgErrorKind | "" = ""): Promise<void> {
   lastSentAt.set("unreachable", Date.now());
-  const ticketLine = "";
+
+  const cfg = isConfigErrorKind(kind) ? CONFIG_ERROR_TEXT[kind] : undefined;
+  if (cfg) {
+    // Configuration problem: WordPress is up, so no @everyone, email or
+    // ticket, and no reminders. Site outages are still caught by the bot's
+    // direct probe of every known site.
+    const embed = new EmbedBuilder()
+      .setTitle(cfg.title)
+      .setDescription(
+        `${cfg.lead}\n\n` +
+        `**Endpoint:** ${siteguard.getUrl() ?? "?"}\n` +
+        `**Error:** ${errorMsg}\n` +
+        `**Impact:** SiteGuard health data is not updating. The bot's own probe of each site keeps running.\n\n` +
+        cfg.fix
+      )
+      .setColor(0xe67e22)
+      .setTimestamp(new Date());
+    const sent = await post(client, embed, false);
+    logger.warn({ error: errorMsg, kind, sent }, "SG configuration error notice");
+    return;
+  }
 
   const embed = new EmbedBuilder()
     .setTitle("\u{1F6A8} WORDPRESS UNREACHABLE")
@@ -497,31 +597,28 @@ async function sendUnreachableAlert(client: Client, errorMsg: string): Promise<v
       `**Endpoint:** ${siteguard.getUrl() ?? "?"}\n` +
       `**Error:** ${errorMsg}\n` +
       `**Impact:** All site health data is stale - outages may go undetected.\n\n` +
-      `Check the WordPress server and SiteGuard plugin immediately.` +
-      ticketLine
+      `Check the WordPress server and SiteGuard plugin immediately.`
     )
     .setColor(0xe74c3c)
     .setTimestamp(new Date());
 
   const sent = await post(client, embed, true);
-  logger.warn({ error: errorMsg, sent }, "SG WordPress unreachable alert");
+  logger.warn({ error: errorMsg, kind, sent }, "SG WordPress unreachable alert");
 
-  const ticketLine2 = await deliverIncident(
+  const ticketLine = await deliverIncident(
     "sg:unreachable",
     "[UNREACHABLE] WordPress health endpoint (SiteGuard)",
     `<h2>WordPress Unreachable</h2><p>The SiteGuard health endpoint at ${escapeHtml(siteguard.getUrl() ?? "")} cannot be reached.</p><p><b>Error:</b> ${escapeHtml(errorMsg)}</p><p>All site health data is stale; outages may be going undetected. Opened automatically by the uptime bot.</p>`
   );
-  if (ticketLine2) {
-    const follow = new EmbedBuilder().setDescription(`WordPress unreachable: ${ticketLine2.trim()}`).setColor(ticketLine2.includes("\u26A0") ? 0xe67e22 : 0x95a5a6);
-    await post(client, follow, ticketLine2.includes("\u26A0"));
-  }
+  await postTicketFollowUp(client, "WordPress unreachable", ticketLine);
 }
 
-async function sendReachableAlert(client: Client): Promise<void> {
+async function sendReachableAlert(client: Client, previousKind: SgErrorKind | "" = ""): Promise<void> {
   const summary = siteguard.getSummary();
+  const wasConfig = isConfigErrorKind(previousKind);
 
   let ticketLine = "";
-  if (isTicketingConfigured()) {
+  if (!wasConfig && isTicketingConfigured()) {
     const rec = await resolveIncidentTicket(
       "sg:unreachable",
       `<p>SiteGuard health endpoint reachable again. ${summary.operational}/${summary.total} sites operational${summary.down > 0 ? `, ${summary.down} down` : ""}. Resolved automatically by the uptime bot.</p>`
@@ -530,9 +627,9 @@ async function sendReachableAlert(client: Client): Promise<void> {
   }
 
   const embed = new EmbedBuilder()
-    .setTitle("\u{1F7E2} WordPress Connection Restored")
+    .setTitle(wasConfig ? "\u{1F7E2} SiteGuard Health Data Available Again" : "\u{1F7E2} WordPress Connection Restored")
     .setDescription(
-      `SiteGuard health endpoint is reachable again.\n\n` +
+      `SiteGuard health endpoint is ${wasConfig ? "answering the bot" : "reachable"} again.\n\n` +
       `**Status:** ${summary.operational}/${summary.total} sites operational` +
       (summary.down > 0 ? `\n**\u{1F534} ${summary.down} site${summary.down > 1 ? "s" : ""} currently down**` : "") +
       ticketLine
@@ -540,14 +637,17 @@ async function sendReachableAlert(client: Client): Promise<void> {
     .setColor(summary.down > 0 ? 0xe74c3c : 0x2ecc71)
     .setTimestamp(new Date());
 
-  // Still mention if sites are down after the connection came back.
-  await post(client, embed, summary.down > 0);
-  logger.info("Sent SG WordPress reachable alert");
+  // Still mention if sites are down after the connection came back (not
+  // after a configuration problem: WordPress was up, sites were probed).
+  await post(client, embed, !wasConfig && summary.down > 0);
+  logger.info({ previousKind }, "Sent SG WordPress reachable alert");
 
-  void maybeEmail(
-    "[RESTORED] WordPress Health Endpoint",
-    `<h2>WordPress Connection Restored</h2><p>Status: ${summary.operational}/${summary.total} sites operational</p>`
-  );
+  if (!wasConfig) {
+    void maybeEmail(
+      "[RESTORED] WordPress Health Endpoint",
+      `<h2>WordPress Connection Restored</h2><p>Status: ${summary.operational}/${summary.total} sites operational</p>`
+    );
+  }
 }
 
 async function sendDataStaleAlert(client: Client, ageSec: number): Promise<void> {

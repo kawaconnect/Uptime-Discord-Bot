@@ -1,0 +1,105 @@
+{
+  "request": "GET /wp-json/sgbackup/v1/health",
+  "http_status": 200,
+  "content_type": "application/json; charset=UTF-8",
+  "time_total": 0.166997,
+  "body": {
+    "status": "down",
+    "site_url": "http://sgt-kp-m.test",
+    "checked_at": 1790374097,
+    "ssl_checked_at": 1790374097,
+    "check_interval": 600,
+    "check_interval_label": "every10min",
+    "ssl_warn_days": 14,
+    "summary": {
+      "total": 3,
+      "operational": 2,
+      "degraded": 0,
+      "down": 1,
+      "unknown": 0,
+      "ssl_ok": 0,
+      "ssl_failing": 1,
+      "ssl_stale": 1,
+      "ssl_expiring_soon": 0,
+      "ssl_expired": 0
+    },
+    "alerts": [
+      {
+        "severity": "critical",
+        "type": "site_down",
+        "domain": "sgt-kp-m.test",
+        "message": "sgt-kp-m.test is DOWN: cURL error 7: Failed to connect to sgt-kp-m.test port 443 after 0 ms: Could not connect to server",
+        "site_id": 3
+      },
+      {
+        "severity": "warning",
+        "type": "ssl_probe_failed",
+        "domain": "sgt-kp-m.test",
+        "message": "SSL probe failed for sgt-kp-m.test: curl: cURL error 7: Failed to connect to sgt-kp-m.test port 443 after 0 ms: Could not connect to server; fallback: stream: Connection refused (errno 111)",
+        "site_id": 3,
+        "ssl_last_success": 0
+      }
+    ],
+    "sites": [
+      {
+        "site_id": 1,
+        "url": "http://sgt-kp-m.test/",
+        "domain": "sgt-kp-m.test",
+        "status": "operational",
+        "http_code": 200,
+        "response_time": 0.028,
+        "ssl_expiry_days": -1,
+        "ssl_issuer": "",
+        "ssl_ok": false,
+        "ssl_error": "",
+        "ssl_stale": false,
+        "ssl_last_success": 0,
+        "ssl_checked_at": 0,
+        "last_check": 1790374097,
+        "error": "",
+        "check_method": "external_fallback",
+        "consecutive_failures": 0
+      },
+      {
+        "site_id": 2,
+        "url": "http://sgt-kp-m.test/sub1/",
+        "domain": "sgt-kp-m.test",
+        "status": "operational",
+        "http_code": 200,
+        "response_time": 0.025,
+        "ssl_expiry_days": -1,
+        "ssl_issuer": "",
+        "ssl_ok": false,
+        "ssl_error": "",
+        "ssl_stale": false,
+        "ssl_last_success": 0,
+        "ssl_checked_at": 0,
+        "last_check": 1790374097,
+        "error": "",
+        "check_method": "external_fallback",
+        "consecutive_failures": 0
+      },
+      {
+        "site_id": 3,
+        "url": "https://sgt-kp-m.test/sub2/",
+        "domain": "sgt-kp-m.test",
+        "status": "down",
+        "http_code": 0,
+        "response_time": 0.001,
+        "ssl_expiry_days": -1,
+        "ssl_issuer": "",
+        "ssl_ok": false,
+        "ssl_error": "SSL probe failed for sgt-kp-m.test: curl: cURL error 7: Failed to connect to sgt-kp-m.test port 443 after 0 ms: Could not connect to server; fallback: stream: Connection refused (errno 111)",
+        "ssl_stale": true,
+        "ssl_last_success": 0,
+        "ssl_checked_at": 1790374097,
+        "last_check": 1790374097,
+        "error": "cURL error 7: Failed to connect to sgt-kp-m.test port 443 after 0 ms: Could not connect to server",
+        "check_method": "external_fallback",
+        "consecutive_failures": 1
+      }
+    ],
+    "version": "1.5.3",
+    "api_version": 2
+  }
+}

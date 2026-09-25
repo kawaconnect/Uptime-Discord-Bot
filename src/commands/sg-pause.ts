@@ -17,13 +17,10 @@ import {
   type ChatInputCommandInteraction,
 } from "discord.js";
 import { logger } from "../util/logger.js";
-import { env } from "../util/env.js";
+import { isAdmin, ADMINS_ONLY } from "../util/admin.js";
+import { NO_MENTIONS } from "../util/mentions.js";
 import { isSgPaused, setSgPaused } from "../services/sgAlerts.js";
 
-function isAdmin(userId: string): boolean {
-  const ids = env().ADMIN_USER_IDS;
-  return ids.length === 0 || ids.includes(userId);
-}
 
 export const sgPauseCommand = new SlashCommandBuilder()
   .setName("sg-pause")
@@ -52,7 +49,7 @@ export async function handleSgPauseCommand(
 ): Promise<void> {
   if (!isAdmin(interaction.user.id)) {
     await interaction.reply({
-      content: "You are not permitted to change SiteGuard monitoring.",
+      content: ADMINS_ONLY,
       ephemeral: true,
     });
     return;
@@ -100,5 +97,5 @@ export async function handleSgPauseCommand(
     .setTimestamp();
   if (pause && reason) embed.addFields({ name: "Reason", value: reason });
 
-  await interaction.reply({ embeds: [embed] });
+  await interaction.reply({ embeds: [embed], allowedMentions: NO_MENTIONS });
 }

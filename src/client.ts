@@ -1,5 +1,6 @@
 import { Client, GatewayIntentBits } from "discord.js";
 import { logger } from "./util/logger.js";
+import { NO_MENTIONS } from "./util/mentions.js";
 import { onReady } from "./events/ready.js";
 import { onInteractionCreate } from "./events/interactionCreate.js";
 
@@ -9,6 +10,9 @@ export function createClient(): Client {
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
     ],
+    // Default for every message and interaction reply: resolve no mentions.
+    // Alerts that are meant to page pass EVERYONE_ONLY explicitly.
+    allowedMentions: NO_MENTIONS,
   });
 
   onReady(client);

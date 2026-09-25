@@ -18,8 +18,10 @@ import { getSetting, setSetting } from "../db/index.js";
 export interface SgSite {
   site_id: number;
   url: string;
+  /** Host name. Subdirectory multisite subsites share it; see sgSiteLabel(). */
   domain: string;
-  status: "operational" | "degraded" | "down";
+  /** "unknown": SiteGuard skipped the site this run (time budget). */
+  status: "operational" | "degraded" | "down" | "unknown";
   http_code: number;
   response_time: number;
   ssl_expiry_days: number;
@@ -28,6 +30,26 @@ export interface SgSite {
   error: string;
   consecutive_failures: number;
   check_method: string;
+  // api_version 2 (SiteGuard 1.4.9+); absent on older versions.
+  ssl_ok?: boolean;
+  ssl_error?: string;
+  /** Certificate data carried forward from an earlier probe (this probe failed). */
+  ssl_stale?: boolean;
+  ssl_last_success?: number;
+  ssl_checked_at?: number;
+  /** SiteGuard 1.5.4+: certificate expiry (epoch seconds or ISO date). */
+  ssl_expires_at?: number | string | null;
+}
+
+/** One entry of SiteGuard's own alerts[] list (api_version 2). */
+export interface SgApiAlert {
+  severity: string;
+  type: string;
+  domain?: string;
+  message?: string;
+  site_id?: number;
+  ssl_expiry_days?: number;
+  ssl_last_success?: number;
 }
 
 export interface SgHealthResponse {
@@ -38,6 +60,104 @@ export interface SgHealthResponse {
   check_interval_label: string;
   sites: SgSite[];
   version: string;
+  api_version?: number;
+  alerts?: SgApiAlert[];
+}
+
+// ---------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------
+
+/**
+ * Why a poll failed. "disabled", "auth", "rate_limited" and "not_found" mean
+ * WordPress answered and the problem is configuration (monitor switched off,
+ * key rotated, IP blocked after bad keys, plugin/route missing): they are
+ * reported once without paging. "http", "bad_payload" and "network" mean
+ * WordPress itself may be down: those page as before.
+ */
+export type SgErrorKind = "disabled" | "auth" | "rate_limited" | "not_found" | "http" | "bad_payload" | "network";
+
+export function isConfigErrorKind(kind: string): boolean {
+  return kind === "disabled" || kind === "auth" || kind === "rate_limited" || kind === "not_found";
+}
+
+export class SgHttpError extends Error {
+  constructor(message: string, readonly kind: SgErrorKind) { super(message); }
+}
+
+/**
+ * Classify a non-2xx answer. SiteGuard sends {"code","message"}; WordPress
+ * sends {"code":"rest_no_route"} when the plugin or route is missing.
+ */
+export function classifySgError(status: number, body: unknown, statusText = ""): SgHttpError {
+  let code = "";
+  let message = "";
+  if (body && typeof body === "object") {
+    const b = body as { code?: unknown; message?: unknown };
+    if (typeof b.code === "string") code = b.code.slice(0, 60);
+    if (typeof b.message === "string") message = b.message.slice(0, 200);
+  }
+  const detail = `HTTP ${status}${code ? ` ${code}` : ""}${message ? `: ${message}` : statusText ? `: ${statusText}` : ""}`;
+  if (status === 404 && code === "disabled") {
+    return new SgHttpError(`${detail} (the health monitor is switched off in SiteGuard \u2192 Health)`, "disabled");
+  }
+  if (status === 401 || status === 403) {
+    return new SgHttpError(`${detail} (API key rejected - was it regenerated, or did a restore bring back another key?)`, "auth");
+  }
+  if (status === 429 && code === "rate_limited") {
+    return new SgHttpError(`${detail} (SiteGuard blocks this IP after too many failed key attempts; it clears by itself)`, "rate_limited");
+  }
+  if (status === 404 && code) {
+    return new SgHttpError(`${detail} (health route not found - is the SiteGuard plugin active and the URL right?)`, "not_found");
+  }
+  return new SgHttpError(detail, "http");
+}
+
+async function sgHttpError(response: Response): Promise<SgHttpError> {
+  let body: unknown = null;
+  try { body = await response.json(); } catch { /* proxy / web server error page */ }
+  return classifySgError(response.status, body, response.statusText);
+}
+
+/** Site name for messages: domain plus path, so subdirectory multisite subsites are told apart. */
+export function sgSiteLabel(site: Pick<SgSite, "domain" | "url"> | { domain?: string | null; url?: string | null }): string {
+  const domain = typeof site.domain === "string" ? site.domain : "";
+  let path = "";
+  let host = "";
+  try {
+    const u = new URL(String(site.url ?? ""));
+    path = u.pathname.replace(/^\/+|\/+$/g, "");
+    host = u.hostname;
+  } catch { /* no usable URL */ }
+  const name = domain || host;
+  if (!name) return String(site.url || "?");
+  return path ? `${name}/${path}` : name;
+}
+
+/** Days until the certificate expires; prefers ssl_expires_at (SiteGuard 1.5.4+). */
+export function sgSslDays(site: SgSite, nowSec = Date.now() / 1000): number {
+  const at = site.ssl_expires_at;
+  let ts = NaN;
+  if (typeof at === "number") ts = at;
+  else if (typeof at === "string" && at) ts = /^\d+$/.test(at) ? Number(at) : Date.parse(at) / 1000;
+  if (Number.isFinite(ts) && ts > 0) return Math.floor((ts - nowSec) / 86400);
+  return typeof site.ssl_expiry_days === "number" ? site.ssl_expiry_days : -1;
+}
+
+/** Force-check URL: /health -> /health/check, also for ?rest_route= style URLs. */
+export function sgCheckUrl(url: string): string {
+  try {
+    const u = new URL(url);
+    const route = u.searchParams.get("rest_route");
+    if (route !== null) {
+      u.searchParams.set("rest_route", route.replace(/\/health\/?$/, "/health/check"));
+      return u.toString();
+    }
+    u.pathname = u.pathname.replace(/\/health\/?$/, "/health/check");
+    return u.toString();
+  } catch {
+    return url.replace(/\/health\/?$/, "/health/check");
+  }
 }
 
 // ---------------------------------------------------------------
@@ -91,11 +211,17 @@ class SiteGuardClient extends EventEmitter {
   private _previousStatuses = new Map<number, string>();
   private _pollTimer: ReturnType<typeof setInterval> | null = null;
   private _reachable = true;
+  /** Sites whose SSL expiry warning was sent (persisted: SG_SSL_ALERTED). */
   private _sslAlerted = new Set<number>();
-  private _firstPoll = true;
+  /** Sites whose SSL probe failure was reported (persisted: SG_SSL_PROBE_ALERTED). */
+  private _sslProbeAlerted = new Set<number>();
+  private _sslLoaded = false;
   private _lastForceCheckAt = 0;
   private _unreachableSince = 0;
   private _lastError = "";
+  private _lastErrorKind: SgErrorKind | "" = "";
+  /** Error kind that the current "unreachable" announcement was made for. */
+  private _alertedErrorKind: SgErrorKind | "" = "";
   private _staleAlerted = false;
   private _statusesLoaded = false;
   /** Sites the bot's own direct HTTP probe currently considers down. */
@@ -111,6 +237,8 @@ class SiteGuardClient extends EventEmitter {
   /** Epoch ms when the endpoint became unreachable (0 when reachable). */
   get unreachableSince(): number { return this._unreachableSince; }
   get lastError(): string { return this._lastError; }
+  /** Classification of the last poll failure ("" when reachable). */
+  get lastErrorKind(): SgErrorKind | "" { return this._lastErrorKind; }
   get sites(): SgSite[] { return this._data?.sites ?? []; }
   get isConfigured(): boolean { return !!this.getUrl(); }
   get dataStale(): boolean {
@@ -302,9 +430,12 @@ class SiteGuardClient extends EventEmitter {
     this._previousStatuses.clear();
     this._statusesLoaded = false;
     this._sslAlerted.clear();
+    this._sslProbeAlerted.clear();
+    this._sslLoaded = false;
     this._reachable = true;
     this._unreachableSince = 0;
-    this._firstPoll = true;
+    this._lastErrorKind = "";
+    this._alertedErrorKind = "";
     this._staleAlerted = false;
     this._directDown.clear();
     this._directFailures.clear();
@@ -345,168 +476,254 @@ class SiteGuardClient extends EventEmitter {
     }
   }
 
+  /**
+   * Persisted id sets for the SSL notices, so a warning that starts while the
+   * bot is restarting is still sent, and one that was sent is not repeated
+   * after a restart. When the setting does not exist yet (first run of this
+   * version), the first poll seeds it silently, as the old in-memory
+   * behaviour did, so an upgrade does not re-announce every known warning.
+   */
+  private _sslSeedSilently = false;
+  private loadSslState(): void {
+    if (this._sslLoaded) return;
+    this._sslLoaded = true;
+    const read = (key: string, into: Set<number>): boolean => {
+      const raw = getSetting(key);
+      if (raw === undefined) return false;
+      try {
+        const arr = JSON.parse(raw);
+        if (Array.isArray(arr)) for (const v of arr) if (Number.isFinite(Number(v))) into.add(Number(v));
+      } catch { /* ignore corrupt value */ }
+      return true;
+    };
+    const hadExpiry = read("SG_SSL_ALERTED", this._sslAlerted);
+    read("SG_SSL_PROBE_ALERTED", this._sslProbeAlerted);
+    this._sslSeedSilently = !hadExpiry;
+  }
+
+  private persistSslState(): void {
+    try {
+      setSetting("SG_SSL_ALERTED", JSON.stringify([...this._sslAlerted]));
+      setSetting("SG_SSL_PROBE_ALERTED", JSON.stringify([...this._sslProbeAlerted]));
+    } catch (err) {
+      logger.warn({ err }, "Could not persist SiteGuard SSL alert state");
+    }
+  }
+
   async poll(): Promise<void> {
     const url = this.getUrl();
     const apiKey = this.getApiKey();
 
     if (!url) return;
 
+    let data: SgHealthResponse;
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 15_000);
-
       const response = await fetch(url, {
         headers: {
           ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
           Accept: "application/json",
         },
-        signal: controller.signal,
+        signal: AbortSignal.timeout(15_000),
       });
-      clearTimeout(timeout);
 
       if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        throw await sgHttpError(response);
       }
 
-      const data = await response.json() as SgHealthResponse;
+      try {
+        data = await response.json() as SgHealthResponse;
+      } catch {
+        throw new SgHttpError(
+          `HTTP ${response.status} but the body is not JSON (${response.headers.get("content-type") || "no content-type"}) - a proxy or PHP error page?`,
+          "bad_payload",
+        );
+      }
       if (!data || !Array.isArray(data.sites)) {
-        throw new Error("Health endpoint returned an unexpected payload (no sites array)");
+        throw new SgHttpError("Health endpoint returned an unexpected payload (no sites array)", "bad_payload");
       }
-      this._data = data;
+    } catch (err) {
+      this.handlePollError(err);
+      return;
+    }
+    this._data = data;
 
-      // If the health data is stale (WordPress cron stopped), trigger a force check via POST.
-      const dataAge = Date.now() / 1000 - (data.checked_at || 0);
-      if (dataAge > SG_STALE_THRESHOLD_SEC && Date.now() - this._lastForceCheckAt > SG_FORCE_CHECK_COOLDOWN_MS) {
-        logger.warn(
-          { dataAgeSec: Math.floor(dataAge), checkedAt: data.checked_at },
-          "SiteGuard data is stale - triggering force check via POST"
-        );
-        this._lastForceCheckAt = Date.now();
-        this.forceCheck(url, apiKey).catch((err) =>
-          logger.warn({ err }, "SiteGuard force check failed")
-        );
+    // Reachability state change
+    if (!this._reachable) {
+      const previousKind = this._alertedErrorKind;
+      this._reachable = true;
+      this._unreachableSince = 0;
+      this._lastError = "";
+      this._lastErrorKind = "";
+      this._alertedErrorKind = "";
+      this.emit("reachable", previousKind);
+      logger.info({ previousKind }, "SiteGuard WordPress endpoint is reachable again");
+    }
+
+    // If the health data is stale (WordPress cron stopped), trigger a force check via POST.
+    const dataAge = Date.now() / 1000 - (data.checked_at || 0);
+    if (dataAge > SG_STALE_THRESHOLD_SEC && Date.now() - this._lastForceCheckAt > SG_FORCE_CHECK_COOLDOWN_MS) {
+      logger.warn(
+        { dataAgeSec: Math.floor(dataAge), checkedAt: data.checked_at },
+        "SiteGuard data is stale - triggering force check via POST"
+      );
+      this._lastForceCheckAt = Date.now();
+      this.forceCheck(url, apiKey).catch((err) =>
+        logger.warn({ err }, "SiteGuard force check failed")
+      );
+    }
+    // Stale-data alerting: the endpoint answers but WordPress has not actually
+    // checked its sites for a long time (cron dead). Sites could be down with
+    // nobody noticing, so this is alert-worthy - once, plus a recovery notice.
+    const staleForAlert = dataAge > 2 * SG_STALE_THRESHOLD_SEC;
+    if (staleForAlert && !this._staleAlerted) {
+      this._staleAlerted = true;
+      this.emit("dataStale", Math.floor(dataAge));
+    } else if (!staleForAlert && this._staleAlerted) {
+      this._staleAlerted = false;
+      this.emit("dataFresh");
+    }
+
+    this.applyData(data);
+
+    logger.debug(
+      { status: data.status, siteCount: data.sites.length, checkedAt: data.checked_at },
+      "SiteGuard poll successful"
+    );
+  }
+
+  private handlePollError(err: unknown): void {
+    this._lastError = err instanceof Error
+      ? (err.name === "TimeoutError" || err.name === "AbortError" ? "Timeout after 15s" : err.message)
+      : String(err);
+    const kind: SgErrorKind = err instanceof SgHttpError ? err.kind : "network";
+    this._lastErrorKind = kind;
+    if (this._reachable) {
+      this._reachable = false;
+      this._unreachableSince = Date.now();
+      this._alertedErrorKind = kind;
+      this.emit("unreachable", this._lastError, kind);
+      logger.error({ err: this._lastError, kind }, "SiteGuard WordPress endpoint unreachable");
+    } else if (isConfigErrorKind(this._alertedErrorKind) && !isConfigErrorKind(kind)) {
+      // First announced as a configuration problem (not paged), and now
+      // WordPress itself does not answer: announce that as a real outage.
+      this._alertedErrorKind = kind;
+      this.emit("unreachable", this._lastError, kind);
+      logger.error({ err: this._lastError, kind }, "SiteGuard endpoint now unreachable (was a configuration error)");
+    } else {
+      logger.warn({ err: this._lastError, kind, downForSec: Math.floor((Date.now() - this._unreachableSince) / 1000) }, "SiteGuard still unreachable");
+    }
+  }
+
+  /**
+   * Apply a health payload (from GET /health or POST /health/check): update
+   * per-site state and emit down / recovery / SSL events on transitions.
+   */
+  private applyData(data: SgHealthResponse): void {
+    this._data = data;
+
+    const sslWarnDays = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14;
+    this.loadPersistedStatuses();
+    this.loadSslState();
+    const seedSsl = this._sslSeedSilently;
+    this._sslSeedSilently = false;
+
+    this.saveKnownSites(data.sites);
+
+    const probeFailed = new Map<number, SgApiAlert>();
+    for (const a of Array.isArray(data.alerts) ? data.alerts : []) {
+      if (a && a.type === "ssl_probe_failed" && Number.isFinite(Number(a.site_id))) probeFailed.set(Number(a.site_id), a);
+    }
+
+    for (const site of data.sites) {
+      // SiteGuard 1.5.4+ sends the expiry date; derive the days from it so
+      // they are current even when the payload is a few minutes old.
+      site.ssl_expiry_days = sgSslDays(site);
+
+      // Status change detection. On the first poll the previous state comes
+      // from the persisted map; a site that is down with no prior record (or a
+      // prior non-down record) is a real outage and MUST alert. Down/up is
+      // announced once across both sources (SiteGuard + the bot's direct probe).
+      // "unknown" = SiteGuard skipped the site this run (time budget): no new
+      // information, so the last known state is kept instead of announcing a
+      // recovery for a site that may still be down.
+      const wasDown = this.isDown(site.site_id);
+      const prev = this._previousStatuses.get(site.site_id);
+      this._previousStatuses.set(site.site_id, site.status === "unknown" && prev ? prev : site.status);
+      const nowDown = this.isDown(site.site_id);
+      if (!wasDown && nowDown) {
+        this.emit("siteDown", site);
+      } else if (wasDown && !nowDown) {
+        this.emit("siteRecovery", site);
       }
-      // Stale-data alerting: the endpoint answers but WordPress has not actually
-      // checked its sites for a long time (cron dead). Sites could be down with
-      // nobody noticing, so this is alert-worthy - once, plus a recovery notice.
-      const staleForAlert = dataAge > 2 * SG_STALE_THRESHOLD_SEC;
-      if (staleForAlert && !this._staleAlerted) {
-        this._staleAlerted = true;
-        this.emit("dataStale", Math.floor(dataAge));
-      } else if (!staleForAlert && this._staleAlerted) {
-        this._staleAlerted = false;
-        this.emit("dataFresh");
-      }
 
-      // Reachability state change
-      if (!this._reachable) {
-        this._reachable = true;
-        this._unreachableSince = 0;
-        this._lastError = "";
-        this.emit("reachable");
-        logger.info("SiteGuard WordPress endpoint is reachable again");
-      }
+      // Skipped sites carry no fresh certificate data either.
+      if (site.status === "unknown") continue;
 
-      // Compare per-site statuses for change detection
-      const sslWarnDays = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14;
-      this.loadPersistedStatuses();
-
-      this.saveKnownSites(data.sites);
-
-      for (const site of data.sites) {
-        // Status change detection. On the first poll the previous state comes
-        // from the persisted map; a site that is down with no prior record (or a
-        // prior non-down record) is a real outage and MUST alert - the old
-        // `!this._firstPoll` guard swallowed every outage that started while the
-        // bot was restarting or before it was connected. Down/up is announced
-        // once across both sources (SiteGuard + the bot's direct probe).
-        const wasDown = this.isDown(site.site_id);
-        this._previousStatuses.set(site.site_id, site.status);
-        const nowDown = this.isDown(site.site_id);
-        if (!wasDown && nowDown) {
-          this.emit("siteDown", site);
-        } else if (wasDown && !nowDown) {
-          this.emit("siteRecovery", site);
-        }
-
-        // SSL expiry alerts (only once per site until it renews)
+      // SSL expiry warning, once per site until it renews. Data carried
+      // forward from a failed probe (ssl_stale) is not trusted, as in
+      // SiteGuard's own alerts: it neither alerts nor re-arms.
+      if (site.ssl_stale !== true) {
         if (site.ssl_expiry_days >= 0 && site.ssl_expiry_days <= sslWarnDays) {
           if (!this._sslAlerted.has(site.site_id)) {
             this._sslAlerted.add(site.site_id);
-            if (!this._firstPoll) {
-              this.emit("sslExpiring", site);
-            }
+            if (!seedSsl) this.emit("sslExpiring", site);
           }
         } else {
-          // SSL renewed, allow re-alerting
-          this._sslAlerted.delete(site.site_id);
+          this._sslAlerted.delete(site.site_id); // renewed (or no certificate): re-arm
         }
-
       }
-      this.persistStatuses();
 
-      this._firstPoll = false;
-      this.emit("updated", data);
-
-      logger.debug(
-        { status: data.status, siteCount: data.sites.length, checkedAt: data.checked_at },
-        "SiteGuard poll successful"
-      );
-    } catch (err) {
-      this._lastError = err instanceof Error ? err.message : String(err);
-      if (this._reachable) {
-        this._reachable = false;
-        this._unreachableSince = Date.now();
-        this.emit("unreachable", this._lastError);
-        logger.error({ err }, "SiteGuard WordPress endpoint unreachable");
-      } else {
-        logger.warn({ err: this._lastError, downForSec: Math.floor((Date.now() - this._unreachableSince) / 1000) }, "SiteGuard still unreachable");
+      // SSL probe failure (SiteGuard could not read the certificate), once
+      // per site until a probe succeeds again.
+      const pf = probeFailed.get(site.site_id);
+      if (pf) {
+        if (!this._sslProbeAlerted.has(site.site_id)) {
+          this._sslProbeAlerted.add(site.site_id);
+          if (!seedSsl) this.emit("sslProbeFailed", site, pf.message ?? site.ssl_error ?? "");
+        }
+      } else if (site.ssl_stale !== true) {
+        this._sslProbeAlerted.delete(site.site_id);
       }
     }
+    this.persistStatuses();
+    this.persistSslState();
+
+    this.emit("updated", data);
   }
 
   /**
    * Trigger an on-demand health check via POST. SiteGuard's cron can stop
    * if WordPress doesn't receive traffic, so this keeps data fresh.
-   * The response contains the fresh health data which we apply immediately.
+   * The response contains the fresh health data, applied like a poll result.
    */
   private async forceCheck(url: string, apiKey: string | undefined): Promise<void> {
-    // POST to /health/check (same base URL but with /check appended)
-    const checkUrl = url.replace(/\/health\/?$/, "/health/check");
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30_000);
+    const response = await fetch(sgCheckUrl(url), {
+      method: "POST",
+      headers: {
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(30_000),
+    });
 
-    try {
-      const response = await fetch(checkUrl, {
-        method: "POST",
-        headers: {
-          ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
-          Accept: "application/json",
-        },
-        signal: controller.signal,
-      });
-      clearTimeout(timeout);
-
-      if (!response.ok) {
-        // 429 = cooldown, that's expected - we'll get fresh data on the next GET poll
-        if (response.status === 429) {
-          logger.info("SiteGuard force check throttled (cooldown) - will retry later");
-          return;
-        }
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    if (!response.ok) {
+      // 429 = cooldown, that's expected - we'll get fresh data on the next GET poll
+      if (response.status === 429) {
+        logger.info("SiteGuard force check throttled (cooldown) - will retry later");
+        return;
       }
-
-      const data = await response.json() as SgHealthResponse;
-      this._data = data;
-      logger.info(
-        { checkedAt: data.checked_at, siteCount: data.sites.length },
-        "SiteGuard force check successful - fresh data applied"
-      );
-      this.emit("updated", data);
-    } catch (err) {
-      clearTimeout(timeout);
-      throw err;
+      throw await sgHttpError(response);
     }
+
+    const data = await response.json() as SgHealthResponse;
+    if (!data || !Array.isArray(data.sites)) {
+      throw new Error("Force check returned an unexpected payload (no sites array)");
+    }
+    logger.info(
+      { checkedAt: data.checked_at, siteCount: data.sites.length },
+      "SiteGuard force check successful - fresh data applied"
+    );
+    this.applyData(data);
   }
 
   getSummary(): { total: number; operational: number; degraded: number; down: number } {
@@ -521,14 +738,16 @@ class SiteGuardClient extends EventEmitter {
 
   getDownSites(): SgSite[] {
     const byId = new Map<number, SgSite>();
-    for (const s of this.sites) if (s.status === "down") byId.set(s.site_id, s);
+    for (const s of this.sites) {
+      if (s.status === "down" || (s.status === "unknown" && this._previousStatuses.get(s.site_id) === "down")) byId.set(s.site_id, s);
+    }
     for (const s of this._directDown.values()) if (!byId.has(s.site_id)) byId.set(s.site_id, s);
     return [...byId.values()];
   }
 
   getSslExpiring(): SgSite[] {
     const warn = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14;
-    return this.sites.filter((s) => s.ssl_expiry_days >= 0 && s.ssl_expiry_days <= warn);
+    return this.sites.filter((s) => s.status !== "unknown" && s.ssl_stale !== true && s.ssl_expiry_days >= 0 && s.ssl_expiry_days <= warn);
   }
 }
 

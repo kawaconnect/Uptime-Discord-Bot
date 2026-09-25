@@ -8,7 +8,7 @@ import {
   ChatInputCommandInteraction,
   EmbedBuilder,
 } from "discord.js";
-import { siteguard, sgStatusEmoji, sgStatusColor, SgStatus, type SgSite } from "../services/siteguard.js";
+import { siteguard, sgStatusEmoji, sgStatusColor, sgSiteLabel, SgStatus } from "../services/siteguard.js";
 import { updateStatusBoard } from "../services/statusBoard.js";
 
 // ---------------------------------------------------------------
@@ -89,7 +89,7 @@ export async function handleSgStatusCommand(
     lines.push("\n**Down sites:**");
     for (const site of downSites) {
       const failures = site.consecutive_failures > 1 ? ` (${site.consecutive_failures} consecutive)` : "";
-      lines.push(`${sgStatusEmoji("down")} ${site.domain} - ${site.error || "No response"}${failures}`);
+      lines.push(`${sgStatusEmoji("down")} ${sgSiteLabel(site)} - ${site.error || "No response"}${failures}`);
     }
   }
 
@@ -98,7 +98,7 @@ export async function handleSgStatusCommand(
   if (sslExpiring.length > 0) {
     lines.push("\n**SSL expiring soon:**");
     for (const site of sslExpiring) {
-      lines.push(`\u26A0\uFE0F ${site.domain} - ${site.ssl_expiry_days} days remaining`);
+      lines.push(`\u26A0\uFE0F ${sgSiteLabel(site)} - ${site.ssl_expiry_days} days remaining`);
     }
   }
 
@@ -138,14 +138,14 @@ export async function handleSgMonitorsCommand(
     return;
   }
 
-  const sorted = [...sites].sort((a, b) => a.domain.localeCompare(b.domain));
+  const sorted = [...sites].sort((a, b) => sgSiteLabel(a).localeCompare(sgSiteLabel(b)));
   const lines: string[] = [];
 
   for (const site of sorted) {
     const emoji = sgStatusEmoji(site.status);
-    const responseMs = Math.round(site.response_time * 1000);
+    const responseMs = Math.round((site.response_time || 0) * 1000);
     const ssl = site.ssl_expiry_days >= 0 ? ` | SSL: ${site.ssl_expiry_days}d` : "";
-    lines.push(`${emoji} **${site.domain}** - ${site.http_code || "ERR"} | ${responseMs}ms${ssl}`);
+    lines.push(`${emoji} **${sgSiteLabel(site)}** - ${site.http_code || "ERR"} | ${responseMs}ms${ssl}`);
     if (site.error) {
       lines.push(`  \u2514 ${site.error}`);
     }
@@ -192,7 +192,7 @@ export async function handleSgDowntimeCommand(
   const lines: string[] = [];
   for (const site of downSites) {
     lines.push(
-      `${sgStatusEmoji("down")} **${site.domain}**\n` +
+      `${sgStatusEmoji("down")} **${sgSiteLabel(site)}**\n` +
       `  URL: ${site.url}\n` +
       `  HTTP: ${site.http_code || "N/A"} | Error: ${site.error || "No response"}\n` +
       `  Last checked: <t:${site.last_check}:R>`

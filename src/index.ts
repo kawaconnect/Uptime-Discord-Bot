@@ -87,6 +87,9 @@ async function deployCommands() {
 async function main() {
   loadEnv();
   logger.info("Environment validated");
+  if (env().ADMIN_USER_IDS.length === 0) {
+    logger.warn("ADMIN_USER_IDS is empty: admin commands (/setup, /sg-setup, /sg-pause, /pause, /resume, /phone toggle) are refused for everyone");
+  }
 
   const dbPath = join(process.cwd(), "data", "bot.db");
   initDb(dbPath);

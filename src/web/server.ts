@@ -1,11 +1,28 @@
-import Fastify, { type FastifyInstance } from "fastify";
+import { timingSafeEqual, createHash } from "node:crypto";
+import Fastify, { type FastifyInstance, type FastifyRequest } from "fastify";
 import { env } from "../util/env.js";
 import { logger } from "../util/logger.js";
 import { kuma, statusLabel } from "../services/kuma.js";
 import { siteguard } from "../services/siteguard.js";
 import { getSmtpConfig } from "../services/email.js";
 
-export async function startWebServer(): Promise<FastifyInstance> {
+/** Constant-time check of "Authorization: Bearer <token>". */
+function hasDebugToken(req: FastifyRequest, token: string): boolean {
+  const header = req.headers.authorization ?? "";
+  const given = header.startsWith("Bearer ") ? header.slice(7) : "";
+  const a = createHash("sha256").update(given).digest();
+  const b = createHash("sha256").update(token).digest();
+  return given.length > 0 && timingSafeEqual(a, b);
+}
+
+/**
+ * Builds the HTTP app without listening (tests use app.inject()).
+ *
+ * /healthz and /readyz are open: the kubelet probes use them. The /debug/*
+ * routes expose monitor names, site URLs and SMTP settings, so they are only
+ * registered when DEBUG_TOKEN is set, and then require it as a bearer token.
+ */
+export function buildWebServer(debugToken: string | undefined = env().DEBUG_TOKEN): FastifyInstance {
   const app = Fastify({ logger: false });
 
   app.get("/healthz", async () => ({ ok: true }));
@@ -24,6 +41,30 @@ export async function startWebServer(): Promise<FastifyInstance> {
     return { ok: true };
   });
 
+  const token = debugToken?.trim();
+  if (token) {
+    app.register(async (debug) => {
+      debug.addHook("onRequest", async (req, reply) => {
+        if (!hasDebugToken(req, token)) {
+          return reply.code(401).send({ ok: false, error: "unauthorized" });
+        }
+      });
+      registerDebugRoutes(debug);
+    });
+  }
+
+  return app;
+}
+
+export async function startWebServer(): Promise<FastifyInstance> {
+  const app = buildWebServer();
+  const port = env().PORT;
+  await app.listen({ port, host: "0.0.0.0" });
+  logger.info({ port, debugEndpoints: !!env().DEBUG_TOKEN?.trim() }, "Web server listening");
+  return app;
+}
+
+function registerDebugRoutes(app: FastifyInstance): void {
   app.get("/debug/status", async () => {
     const summary = kuma.getSummary();
     const monitors: Record<string, unknown>[] = [];
@@ -79,10 +120,4 @@ export async function startWebServer(): Promise<FastifyInstance> {
       auth: !!config.user,
     };
   });
-
-  const port = env().PORT;
-  await app.listen({ port, host: "0.0.0.0" });
-  logger.info({ port }, "Web server listening");
-
-  return app;
 }

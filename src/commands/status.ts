@@ -3,8 +3,10 @@ import {
   ChatInputCommandInteraction,
   AutocompleteInteraction,
   EmbedBuilder,
+  PermissionFlagsBits,
 } from "discord.js";
 import { logger } from "../util/logger.js";
+import { isAdmin, ADMINS_ONLY } from "../util/admin.js";
 import { kuma, MonitorStatus, statusEmoji, statusLabel, statusColor } from "../services/kuma.js";
 import { updateStatusBoard } from "../services/statusBoard.js";
 
@@ -42,14 +44,16 @@ export const monitorCommand = new SlashCommandBuilder()
 
 export const pauseCommand = new SlashCommandBuilder()
   .setName("pause")
-  .setDescription("Pause a monitor")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  .setDescription("Pause a monitor (admin only)")
   .addStringOption((o) =>
     o.setName("name").setDescription("Monitor name").setRequired(true).setAutocomplete(true)
   );
 
 export const resumeCommand = new SlashCommandBuilder()
   .setName("resume")
-  .setDescription("Resume a paused monitor")
+  .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
+  .setDescription("Resume a paused monitor (admin only)")
   .addStringOption((o) =>
     o.setName("name").setDescription("Monitor name").setRequired(true).setAutocomplete(true)
   );
@@ -244,6 +248,13 @@ export async function handleMonitorCommand(interaction: ChatInputCommandInteract
 }
 
 export async function handlePauseCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  // Pausing a Kuma monitor silences its alerts and phone escalation, so it is
+  // an admin action (hidden from non-Manage-Server members by default, and
+  // checked against ADMIN_USER_IDS here).
+  if (!isAdmin(interaction.user.id)) {
+    await interaction.reply({ content: ADMINS_ONLY, ephemeral: true });
+    return;
+  }
   if (!ensureConnected(interaction)) return;
   await interaction.deferReply({ ephemeral: true });
 
@@ -268,6 +279,13 @@ export async function handlePauseCommand(interaction: ChatInputCommandInteractio
 }
 
 export async function handleResumeCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  // Pausing a Kuma monitor silences its alerts and phone escalation, so it is
+  // an admin action (hidden from non-Manage-Server members by default, and
+  // checked against ADMIN_USER_IDS here).
+  if (!isAdmin(interaction.user.id)) {
+    await interaction.reply({ content: ADMINS_ONLY, ephemeral: true });
+    return;
+  }
   if (!ensureConnected(interaction)) return;
   await interaction.deferReply({ ephemeral: true });
 
@@ -307,7 +325,6 @@ export async function handleDowntimeCommand(interaction: ChatInputCommandInterac
   }
 
   const lines = downList.map((d) => {
-    const ping = kuma.avgPing.get(d.monitor.id);
     return `${statusEmoji(MonitorStatus.DOWN)} **${d.monitor.name}**\n  Type: ${d.monitor.type} | URL: ${d.monitor.url || d.monitor.hostname || "N/A"}`;
   });
 
