@@ -156,8 +156,10 @@ pipeline. It includes the shared `dean/ci-templates` `/docker.yml` template,
 which sets when pipelines run and the stages.
 
 **When it runs:** on a `v*` tag, or when a pipeline is started by hand from the
-GitLab UI (Build > Pipelines > Run pipeline) or the API. Pushes to `master` and
-merge requests do not start a pipeline.
+GitLab UI (Build > Pipelines > Run pipeline) or the API. A merge request (e.g. a
+Renovate MR) also gets a pipeline that runs `check` and builds the image, but
+never publishes anything (no registry push, no GHCR mirror). Pushes to `master`
+do not start a pipeline.
 
 **Jobs:**
 

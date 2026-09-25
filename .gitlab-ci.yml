@@ -13,6 +13,11 @@
 # Node the Dockerfile uses; the image only builds once that passes. The smoke
 # script also loads the compiled better-sqlite3 native binding, the one
 # dependency that can fail to install on Alpine.
+#
+# Merge requests (e.g. Renovate MRs) also get a pipeline, via the template's
+# workflow rules: tests and image builds only. The template never pushes,
+# mirrors to GHCR or releases from an MR pipeline, and release jobs here are
+# kept off MRs.
 
 include:
   - project: dean/ci-templates
