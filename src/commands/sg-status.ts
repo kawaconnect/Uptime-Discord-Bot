@@ -10,6 +10,7 @@ import {
 } from "discord.js";
 import { siteguard, sgStatusEmoji, sgStatusColor, sgSiteLabel, SgStatus } from "../services/siteguard.js";
 import { updateStatusBoard } from "../services/statusBoard.js";
+import { isSgSitePaused } from "../services/sgSitePauses.js";
 
 // ---------------------------------------------------------------
 // Command definitions
@@ -145,7 +146,8 @@ export async function handleSgMonitorsCommand(
     const emoji = sgStatusEmoji(site.status);
     const responseMs = Math.round((site.response_time || 0) * 1000);
     const ssl = site.ssl_expiry_days >= 0 ? ` | SSL: ${site.ssl_expiry_days}d` : "";
-    lines.push(`${emoji} **${sgSiteLabel(site)}** - ${site.http_code || "ERR"} | ${responseMs}ms${ssl}`);
+    const paused = isSgSitePaused(site.site_id) ? " | \u23F8 alerts paused" : "";
+    lines.push(`${emoji} **${sgSiteLabel(site)}** - ${site.http_code || "ERR"} | ${responseMs}ms${ssl}${paused}`);
     if (site.error) {
       lines.push(`  \u2514 ${site.error}`);
     }
@@ -192,7 +194,7 @@ export async function handleSgDowntimeCommand(
   const lines: string[] = [];
   for (const site of downSites) {
     lines.push(
-      `${sgStatusEmoji("down")} **${sgSiteLabel(site)}**\n` +
+      `${sgStatusEmoji("down")} **${sgSiteLabel(site)}**${isSgSitePaused(site.site_id) ? " (\u23F8 alerts paused)" : ""}\n` +
       `  URL: ${site.url}\n` +
       `  HTTP: ${site.http_code || "N/A"} | Error: ${site.error || "No response"}\n` +
       `  Last checked: <t:${site.last_check}:R>`

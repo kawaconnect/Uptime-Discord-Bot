@@ -23,7 +23,10 @@
  *   for lack of configuration; if truly nothing is configured it is logged at
  *   error level.
  *
- * Each alert type can be toggled via /sg-setup alerts-toggle.
+ * Each alert type can be toggled via /sg-setup alerts-toggle. Alerts for a
+ * single site can be paused with /sg-pause site (see sgSitePauses.ts): its
+ * down/recovery/SSL alerts, reminders, tickets and phone calls are skipped
+ * while its state keeps being tracked.
  * @everyone and email are independently configurable (default: both ON for SiteGuard).
  */
 
@@ -44,7 +47,7 @@ import {
   type SgErrorKind,
 } from "./siteguard.js";
 import { escapeHtml } from "../util/html.js";
-import { mentionsFor } from "../util/mentions.js";
+import { mentionsFor, NO_MENTIONS } from "../util/mentions.js";
 import { discordQueue } from "../queue/index.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 import {
@@ -56,6 +59,13 @@ import {
   ticketUrl,
 } from "./tickets.js";
 import { isPhoneEscalationEnabled, markDown, markUp, reportActive } from "./phone.js";
+import {
+  isSgSitePaused,
+  dueSitePauses,
+  deleteSitePause,
+  sgSiteResumeEmbed,
+  type SgSitePause,
+} from "./sgSitePauses.js";
 
 const SG_ALERT_CHANNEL_KEY = "SG_ALERT_CHANNEL_ID";
 const REMINDER_TICK_MS = 60_000;
@@ -218,6 +228,10 @@ export function startSgAlerts(client: Client): void {
   // ---- Site goes DOWN ----
   siteguard.on("siteDown", (site: SgSite) => {
     downSites.set(site.site_id, site);
+    if (isSgSitePaused(site.site_id)) {
+      logger.info({ site: sgSiteLabel(site) }, "SG site down while its alerts are paused: not announced");
+      return;
+    }
     markDown(`sg:site:${site.site_id}`);
     if (!isSgEnabled("SITE_DOWN")) return;
     sendSiteDownAlert(client, site).catch((err) =>
@@ -232,6 +246,15 @@ export function startSgAlerts(client: Client): void {
     markUp(`sg:site:${site.site_id}`).catch(() => undefined);
     sslExpiring.delete(site.site_id);
     sslEscalated.delete(site.site_id);
+    if (isSgSitePaused(site.site_id)) {
+      // Not announced, but a ticket opened before the pause is still closed.
+      logger.info({ site: sgSiteLabel(site) }, "SG site recovered while its alerts are paused: not announced");
+      if (isTicketingConfigured()) {
+        resolveIncidentTicket(`sg:site:${site.site_id}`, `<p>${escapeHtml(sgSiteLabel(site))} is back UP (alerts for this site were paused). Resolved automatically by the uptime bot.</p>`)
+          .catch((err) => logger.warn({ err }, "Could not resolve the ticket of a paused site"));
+      }
+      return;
+    }
     if (!isSgEnabled("SITE_RECOVERY")) return;
     sendSiteRecoveryAlert(client, site).catch((err) =>
       logger.error({ err, site: sgSiteLabel(site) }, "Failed to send SG recovery alert")
@@ -241,6 +264,7 @@ export function startSgAlerts(client: Client): void {
   // ---- SSL expiring ----
   siteguard.on("sslExpiring", (site: SgSite) => {
     sslExpiring.set(site.site_id, site);
+    if (isSgSitePaused(site.site_id)) return;
     markDown(`sg:ssl:${site.site_id}`);
     if (!isSgEnabled("SSL_EXPIRING")) return;
     sendSslExpiringAlert(client, site).catch((err) =>
@@ -271,6 +295,7 @@ export function startSgAlerts(client: Client): void {
 
   // ---- SSL probe failed (SiteGuard could not read the certificate) ----
   siteguard.on("sslProbeFailed", (site: SgSite, message: string) => {
+    if (isSgSitePaused(site.site_id)) return;
     if (!isSgEnabled("SSL_EXPIRING")) return;
     sendSslProbeFailedAlert(client, site, message).catch((err) =>
       logger.error({ err, site: sgSiteLabel(site) }, "Failed to send SG SSL probe alert")
@@ -298,7 +323,11 @@ export function startSgAlerts(client: Client): void {
   // ---- Reminders while an incident persists ----
   if (!reminderTimer) {
     reminderTimer = setInterval(() => {
-      runReminders(client).catch((err) => logger.error({ err }, "SG reminder tick failed"));
+      // Lapsed site pauses first, so a site that went down while paused gets
+      // its down alert before any "still down" reminder.
+      runSgSiteAutoResume(client)
+        .catch((err) => logger.error({ err }, "SG site auto-resume failed"))
+        .then(() => runReminders(client)).catch((err) => logger.error({ err }, "SG reminder tick failed"));
       reportDownSitesToPbx().catch((err) => logger.error({ err }, "SG phone escalation tick failed"));
     }, REMINDER_TICK_MS);
   }
@@ -318,6 +347,10 @@ async function reportDownSitesToPbx(): Promise<void> {
 
   for (const site of downSites.values()) {
     const key = `sg:site:${site.site_id}`;
+    if (isSgSitePaused(site.site_id)) {
+      await markUp(key).catch(() => undefined); // stop any call already in progress
+      continue;
+    }
     markDown(key);
     const name = sgSiteLabel(site) || `site ${site.site_id}`;
     await reportActive(key, `Web site ${name} is down.`, "uptime", "sg-site-down");
@@ -325,6 +358,7 @@ async function reportDownSitesToPbx(): Promise<void> {
 
   for (const site of sslExpiring.values()) {
     if (sslEscalated.has(site.site_id)) continue;
+    if (isSgSitePaused(site.site_id)) continue;
     const key = `sg:ssl:${site.site_id}`;
     markDown(key);
     const name = sgSiteLabel(site) || `site ${site.site_id}`;
@@ -402,25 +436,27 @@ export async function runReminders(client: Client): Promise<void> {
         downSites.delete(id); // recovered without an event (e.g. restart) - drop it
       }
     }
-    if (downSites.size === 0) return;
+    // Sites whose alerts are paused are left out of the reminder.
+    const active = [...downSites.values()].filter((site) => !isSgSitePaused(site.site_id));
+    if (active.length === 0) return;
 
-    const oldest = Math.min(...[...downSites.keys()].map((id) => lastSentAt.get(`site:${id}`) ?? 0));
+    const oldest = Math.min(...active.map((site) => lastSentAt.get(`site:${site.site_id}`) ?? 0));
     if (oldest > 0 && now - oldest < everyMs) return;
 
-    const lines = [...downSites.values()]
+    const lines = active
       .sort((a, b) => sgSiteLabel(a).localeCompare(sgSiteLabel(b)))
       .map((s) => `${sgStatusEmoji("down")} **${sgSiteLabel(s)}** - ${s.error || `HTTP ${s.http_code || "?"}`} (${s.consecutive_failures ?? "?"} consecutive failures)`);
     const embed = new EmbedBuilder()
-      .setTitle(`\u{1F534} ${downSites.size} SITE${downSites.size > 1 ? "S" : ""} STILL DOWN`)
-      .setDescription(lines.join("\n") + `\n\nThis reminder repeats every ${every} min until the site${downSites.size > 1 ? "s" : ""} recover.`)
+      .setTitle(`\u{1F534} ${active.length} SITE${active.length > 1 ? "S" : ""} STILL DOWN`)
+      .setDescription(lines.join("\n") + `\n\nThis reminder repeats every ${every} min until the site${active.length > 1 ? "s" : ""} recover.`)
       .setColor(0xe74c3c)
       .setTimestamp(new Date());
     await post(client, embed, true);
-    for (const id of downSites.keys()) lastSentAt.set(`site:${id}`, now);
-    logger.warn({ count: downSites.size }, "Sent SG sites-down REMINDER");
-    void maybeEmail(`[STILL DOWN] ${downSites.size} site(s)`, `<h2>${downSites.size} site(s) still down</h2><ul>${[...downSites.values()].map((s) => `<li>${escapeHtml(sgSiteLabel(s))} - ${escapeHtml(s.error || String(s.http_code))}</li>`).join("")}</ul>`);
+    for (const site of active) lastSentAt.set(`site:${site.site_id}`, now);
+    logger.warn({ count: active.length }, "Sent SG sites-down REMINDER");
+    void maybeEmail(`[STILL DOWN] ${active.length} site(s)`, `<h2>${active.length} site(s) still down</h2><ul>${active.map((s) => `<li>${escapeHtml(sgSiteLabel(s))} - ${escapeHtml(s.error || String(s.http_code))}</li>`).join("")}</ul>`);
     if (isTicketsEnabled()) {
-      for (const s of downSites.values()) {
+      for (const s of active) {
         await noteIncidentTicket(`sg:site:${s.site_id}`, `<p>${escapeHtml(sgSiteLabel(s))} still down (${escapeHtml(s.consecutive_failures ?? "?")} consecutive failures). Error: ${escapeHtml(s.error || String(s.http_code))}</p>`);
       }
     }
@@ -676,4 +712,91 @@ async function sendDataFreshAlert(client: Client): Promise<void> {
     .setTimestamp(new Date());
   await post(client, embed, false);
   logger.info("Sent SG data-fresh alert");
+}
+
+// ---------------------------------------------------------------
+// Per-site pause: state on resume, auto-resume
+// ---------------------------------------------------------------
+
+/** One-line current state of a site, for pause/resume notices. */
+export function sgSiteStatusLine(siteId: number): { line: string; down: boolean } {
+  const down = siteguard.getDownSites().find((s) => s.site_id === siteId);
+  if (down) {
+    return {
+      line: `${sgStatusEmoji("down")} **DOWN** - ${(down.error || `HTTP ${down.http_code || "?"}`).slice(0, 300)} (${down.consecutive_failures ?? "?"} consecutive failures)`,
+      down: true,
+    };
+  }
+  const site = siteguard.sites.find((s) => s.site_id === siteId);
+  if (!site) return { line: "No current health data for this site.", down: false };
+  let line = `${sgStatusEmoji(site.status)} ${site.status === "unknown" ? "Not checked in the last run" : site.status.charAt(0).toUpperCase() + site.status.slice(1)}`;
+  if (site.http_code) line += ` - HTTP ${site.http_code}, ${Math.round((site.response_time || 0) * 1000)}ms`;
+  if (sslExpiring.has(siteId) || (site.ssl_expiry_days >= 0 && site.ssl_expiry_days <= (parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14) && site.ssl_stale !== true)) {
+    line += `\n\u26A0\uFE0F SSL certificate expires in ${site.ssl_expiry_days} days`;
+  }
+  return { line, down: false };
+}
+
+/**
+ * After a site's pause ends: if it is down and the outage was never announced
+ * (it went down while paused), send the normal down alert now (ticket and
+ * phone escalation included), so nothing is lost by the pause.
+ */
+export async function alertSiteAfterResume(client: Client, siteId: number): Promise<boolean> {
+  const down = siteguard.getDownSites().find((s) => s.site_id === siteId);
+  if (!down) return false;
+  downSites.set(siteId, down);
+  if (lastSentAt.has(`site:${siteId}`)) return false; // announced before the pause; reminders carry on
+  markDown(`sg:site:${siteId}`);
+  if (!isSgEnabled("SITE_DOWN")) return false;
+  await sendSiteDownAlert(client, down);
+  return true;
+}
+
+async function channelFor(client: Client, channelId: string | null): Promise<TextChannel | null> {
+  if (channelId) {
+    try {
+      const ch = await client.channels.fetch(channelId) as TextChannel | null;
+      if (ch?.isTextBased()) return ch;
+    } catch { /* fall back to the alert channel */ }
+  }
+  return getSgAlertChannel(client);
+}
+
+/**
+ * End every site pause whose time has come: announce it (with the site's
+ * current state) where it was paused, then alert an outage that started
+ * during the pause. Returns the number of pauses ended. Runs on the reminder
+ * tick; exported for tests.
+ */
+export async function runSgSiteAutoResume(client: Client, now = Date.now()): Promise<number> {
+  let ended = 0;
+  for (const p of dueSitePauses(now)) {
+    if (!deleteSitePause(p.siteId)) continue;
+    ended++;
+    logger.info({ site: p.siteLabel, siteId: p.siteId }, "SG site pause ended (auto-resume)");
+    await announceSiteResume(client, p, { auto: true, now }).catch((err) =>
+      logger.error({ err, site: p.siteLabel }, "Failed to announce the SG site auto-resume"),
+    );
+  }
+  return ended;
+}
+
+/** Post the resume notice for a site, then its down alert if one is owed. */
+export async function announceSiteResume(
+  client: Client,
+  p: SgSitePause,
+  opts: { auto: boolean; userId?: string; now?: number; send?: (embed: EmbedBuilder) => Promise<void> },
+): Promise<void> {
+  const status = sgSiteStatusLine(p.siteId);
+  const embed = sgSiteResumeEmbed(p, { auto: opts.auto, userId: opts.userId, currentStatus: status.line, down: status.down, now: opts.now });
+  if (opts.send) {
+    await opts.send(embed);
+  } else {
+    const ch = await channelFor(client, p.channelId);
+    if (ch) await discordQueue.add(async () => { await ch.send({ embeds: [embed], allowedMentions: NO_MENTIONS }); });
+    else logger.warn({ site: p.siteLabel }, "No channel to announce the SG site resume in");
+  }
+  if (isSgPaused()) return; // all of SiteGuard is paused: nothing alerts
+  await alertSiteAfterResume(client, p.siteId);
 }

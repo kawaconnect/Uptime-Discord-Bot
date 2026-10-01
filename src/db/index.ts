@@ -30,6 +30,20 @@ CREATE TABLE IF NOT EXISTS monitor_pauses (
   channel_id    TEXT,
   group_id      INTEGER
 );
+
+-- SiteGuard sites paused through /sg-pause site. One row per paused site;
+-- resume_at (epoch ms) is NULL for an open-ended pause.
+CREATE TABLE IF NOT EXISTS sg_site_pauses (
+  site_id       INTEGER PRIMARY KEY,
+  site_label    TEXT NOT NULL,
+  site_url      TEXT NOT NULL DEFAULT '',
+  paused_by     TEXT NOT NULL,
+  paused_by_id  TEXT NOT NULL,
+  reason        TEXT,
+  paused_at     INTEGER NOT NULL,
+  resume_at     INTEGER,
+  channel_id    TEXT
+);
 `;
 
 let _db: Database.Database | null = null;

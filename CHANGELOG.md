@@ -2,6 +2,32 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.6] - 2026-10-01
+
+### Added
+- Pause alerts for one SiteGuard site at a time:
+  `/sg-pause site <site> [duration] [reason]` and `/sg-pause site-resume <site>`
+  (admin only, same check as the rest of `/sg-pause`). `site` autocompletes
+  from the SiteGuard sites the bot knows, matching any part of the name or
+  URL.
+- While a site is paused it gets no down, recovery or SSL alerts, reminders,
+  alert emails, tickets or phone calls; every other site alerts as before.
+  The bot keeps polling and probing the site, so its state stays current, and
+  `/sg-monitors`, `/sg-downtime` and the status board mark it "alerts paused".
+- A duration (`30m`, `2h`, `1d`, `1h30m`, up to 30 days) ends the pause by
+  itself. On resume, manual or automatic, the bot posts the site's current
+  state; if it went down while paused, the normal down alert follows then.
+- Pauses are stored in `data/bot.db` (table `sg_site_pauses`) and survive
+  restarts.
+- `/sg-pause status` lists paused sites with who paused them, why and until
+  when.
+
+### Notes
+- `/sg-pause on|off` (all of SiteGuard) works as before.
+- No deployment change needed: no new environment variables; the new table
+  is created in the existing `data/bot.db` on the `/app/data` volume.
+- Version 1.0.5 -> 1.0.6 in `package.json`, `package-lock.json`.
+
 ## [1.0.5] - 2026-10-01
 
 ### Added

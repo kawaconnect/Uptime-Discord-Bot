@@ -240,6 +240,11 @@ class SiteGuardClient extends EventEmitter {
   /** Classification of the last poll failure ("" when reachable). */
   get lastErrorKind(): SgErrorKind | "" { return this._lastErrorKind; }
   get sites(): SgSite[] { return this._data?.sites ?? []; }
+  /** Sites seen in earlier polls (persisted), for when no fresh data is in. */
+  get knownSites(): Array<{ site_id: number; url: string; domain: string }> {
+    if (this._knownSites.length === 0) this.loadKnownSites();
+    return this._knownSites;
+  }
   get isConfigured(): boolean { return !!this.getUrl(); }
   get dataStale(): boolean {
     if (!this._data) return false;

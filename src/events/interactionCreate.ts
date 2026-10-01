@@ -21,14 +21,15 @@ import {
   handleSgRefreshCommand,
 } from "../commands/sg-status.js";
 import { handlePhoneCommand } from "../commands/phone.js";
-import { handleSgPauseCommand } from "../commands/sg-pause.js";
+import { handleSgPauseCommand, handleSgSiteAutocomplete } from "../commands/sg-pause.js";
 
 export function onInteractionCreate(client: Client): void {
   client.on(Events.InteractionCreate, async (interaction) => {
     // Handle autocomplete
     if (interaction.isAutocomplete()) {
       try {
-        await handleMonitorAutocomplete(interaction);
+        if (interaction.commandName === "sg-pause") await handleSgSiteAutocomplete(interaction);
+        else await handleMonitorAutocomplete(interaction);
       } catch (err) {
         logger.debug({ err }, "Autocomplete error");
       }

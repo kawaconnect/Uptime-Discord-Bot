@@ -198,9 +198,43 @@ Run `/help` in Discord for the full, always-current list. Highlights:
 `/sg-status`, `/sg-monitors [filter]`, `/sg-downtime`
 
 **Actions:** `/pause <name> [duration] [reason]`, `/resume <name>` (admin only),
-`/paused`, `/refresh`, `/sg-refresh`
+`/paused`, `/sg-pause site <site> [duration] [reason]`, `/sg-pause site-resume <site>`
+(admin only), `/refresh`, `/sg-refresh`
 
-### Pausing a site
+### Pausing one SiteGuard site
+
+`/sg-pause on|off` silences every SiteGuard alert at once. To silence a single
+WordPress site (a theme update, a migration, a client site that is known to be
+down) while every other site keeps alerting:
+
+- `/sg-pause site site:<site> [duration:2h] [reason:theme update]` (admin
+  only). `site` autocompletes from the sites the bot knows (the latest
+  SiteGuard poll, plus sites remembered from earlier polls), matching any part
+  of the site name or URL. Subdirectory multisite subsites show as
+  `domain/path`. Text typed without picking from the list must match one site.
+- While paused, that site gets no down, recovery or SSL alerts, no "still
+  down" reminders, no alert email, no ticket and no phone call (a call already
+  running for it is cleared). A ticket opened before the pause is still closed
+  when the site recovers. The bot keeps polling SiteGuard and probing the
+  site, so its state stays current; `/sg-monitors`, `/sg-downtime` and the
+  status board mark it "alerts paused".
+- `duration` takes `30m`, `2h`, `1d`, `1w`, `1h30m` or a bare number of
+  minutes, up to 30 days. Without one the pause lasts until
+  `/sg-pause site-resume`. Running `/sg-pause site` again on a paused site with
+  a new duration or reason updates the pause.
+- On resume (manual or when the duration lapses, checked every minute) the bot
+  posts the site's current state in the channel the pause was made from. If
+  the site went down while paused, the normal down alert (with `@everyone`,
+  ticket and phone escalation, as configured) follows, so nothing is lost.
+- `/sg-pause status` (admin only) lists the paused sites with who paused them,
+  why and until when.
+
+Pauses are announced in the channel (who, which site, until when, reason);
+errors (not an admin, unknown site, bad duration) are private replies. They
+are stored in the `sg_site_pauses` table of `data/bot.db`, so timed pauses
+survive restarts.
+
+### Pausing a Kuma monitor
 
 `/pause` pauses a monitor in Uptime Kuma itself: Kuma stops checking it, so
 there are no alerts, emails or phone calls for it until it is resumed.

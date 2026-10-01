@@ -17,6 +17,7 @@ import { getSetting, setSetting } from "../db/index.js";
 import { kuma, MonitorStatus, statusEmoji, statusLabel, type KumaMonitor } from "./kuma.js";
 import { NO_MENTIONS } from "../util/mentions.js";
 import { siteguard, sgStatusEmoji, sgSiteLabel, SgStatus, type SgSite } from "./siteguard.js";
+import { isSgSitePaused } from "./sgSitePauses.js";
 import { discordQueue } from "../queue/index.js";
 
 const STATUS_CHANNEL_KEY = "STATUS_CHANNEL_ID";
@@ -365,5 +366,6 @@ function formatSiteLine(site: SgSite, dataStale: boolean): string {
   if (sslStr) parts.push(sslStr);
   if (site.consecutive_failures > 1) parts.push(`\u{1F6A8} ${site.consecutive_failures} consecutive failures`);
   if (site.error) parts.push(`\u26A0 ${site.error}`);
+  if (isSgSitePaused(site.site_id)) parts.push("\u23F8 alerts paused");
   return parts.join(" - ");
 }
