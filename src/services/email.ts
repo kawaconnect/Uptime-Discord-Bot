@@ -11,7 +11,7 @@
  */
 
 import nodemailer from "nodemailer";
-import type { Transporter } from "nodemailer";
+import type { Transporter, TransportOptions } from "nodemailer";
 import { logger } from "../util/logger.js";
 import { getSetting } from "../db/index.js";
 import { escapeHtml } from "../util/html.js";
@@ -69,7 +69,7 @@ export function configureSmtp(): void {
   const internalHost = /\.svc(\.cluster\.local)?\.?$|^localhost$|^127\./i.test(config.host);
   const rejectUnauthorized = rejectSetting !== undefined ? rejectSetting !== "false" : !internalHost;
 
-  const opts: nodemailer.TransportOptions & { host: string; port: number; secure: boolean; auth?: { user: string; pass: string }; tls?: { rejectUnauthorized: boolean }; connectionTimeout?: number } = {
+  const opts: TransportOptions & { host: string; port: number; secure: boolean; auth?: { user: string; pass: string }; tls?: { rejectUnauthorized: boolean }; connectionTimeout?: number } = {
     host: config.host,
     port: config.port,
     secure: config.secure,

@@ -7,7 +7,25 @@ import {
 } from "discord.js";
 import { logger } from "../util/logger.js";
 import { isAdmin, ADMINS_ONLY } from "../util/admin.js";
-import { kuma, MonitorStatus, statusEmoji, statusLabel, statusColor } from "../services/kuma.js";
+import { NO_MENTIONS } from "../util/mentions.js";
+import { kuma, MonitorStatus, statusEmoji, statusLabel, statusColor, type KumaMonitor } from "../services/kuma.js";
+import {
+  monitorChoices,
+  resolveMonitorStrict,
+  parseDuration,
+  formatDuration,
+  discordTime,
+  pauseWithSchedule,
+  resumeAndClear,
+  pauseEmbed,
+  resumeEmbed,
+  pausedLines,
+  pruneStalePauses,
+  listPauses,
+  getPause,
+  MAX_PAUSE_MS,
+  type ChoiceMode,
+} from "../services/monitorPauses.js";
 import { updateStatusBoard } from "../services/statusBoard.js";
 
 // ---------------------------------------------------------------
@@ -45,18 +63,32 @@ export const monitorCommand = new SlashCommandBuilder()
 export const pauseCommand = new SlashCommandBuilder()
   .setName("pause")
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-  .setDescription("Pause a monitor (admin only)")
+  .setDescription("Pause a monitor or group in Uptime Kuma, optionally for a set time (admin only)")
   .addStringOption((o) =>
-    o.setName("name").setDescription("Monitor name").setRequired(true).setAutocomplete(true)
+    o.setName("name").setDescription("Monitor or group (type to search)").setRequired(true).setAutocomplete(true)
+  )
+  .addStringOption((o) =>
+    o
+      .setName("duration")
+      .setDescription("Resume automatically after e.g. 30m, 2h, 1d, 1h30m (blank = until /resume)")
+      .setRequired(false)
+      .setMaxLength(20)
+  )
+  .addStringOption((o) =>
+    o.setName("reason").setDescription("Why, so the channel knows (e.g. ISP maintenance)").setRequired(false).setMaxLength(300)
   );
 
 export const resumeCommand = new SlashCommandBuilder()
   .setName("resume")
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild)
-  .setDescription("Resume a paused monitor (admin only)")
+  .setDescription("Resume a paused monitor or group (admin only)")
   .addStringOption((o) =>
-    o.setName("name").setDescription("Monitor name").setRequired(true).setAutocomplete(true)
+    o.setName("name").setDescription("Monitor or group (type to search)").setRequired(true).setAutocomplete(true)
   );
+
+export const pausedCommand = new SlashCommandBuilder()
+  .setName("paused")
+  .setDescription("List paused monitors: who paused them, why, and when they resume");
 
 export const downtimeCommand = new SlashCommandBuilder()
   .setName("downtime")
@@ -74,18 +106,9 @@ export async function handleMonitorAutocomplete(
   interaction: AutocompleteInteraction
 ): Promise<void> {
   const focused = interaction.options.getFocused();
-  const matches = kuma.searchMonitors(focused, 25);
-
-  await interaction.respond(
-    matches.map((m) => {
-      const status = kuma.latestStatus.get(m.id);
-      const emoji = !m.active ? "\u23F8" : status !== undefined ? (status === MonitorStatus.UP ? "\u2705" : status === MonitorStatus.DOWN ? "\u274C" : "\u26A0") : "\u2753";
-      return {
-        name: `${emoji} ${m.name}`.slice(0, 100),
-        value: String(m.id),
-      };
-    })
-  );
+  const mode: ChoiceMode =
+    interaction.commandName === "pause" ? "pause" : interaction.commandName === "resume" ? "resume" : "any";
+  await interaction.respond(monitorChoices(kuma.monitors, kuma.latestStatus, focused, mode, 25));
 }
 
 // ---------------------------------------------------------------
@@ -247,66 +270,121 @@ export async function handleMonitorCommand(interaction: ChatInputCommandInteract
   await interaction.reply({ embeds: [embed], ephemeral: true });
 }
 
-export async function handlePauseCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+/**
+ * Admin gate, Kuma connection and monitor lookup shared by /pause and
+ * /resume. Answers the interaction (ephemerally) and returns null on failure.
+ */
+async function adminMonitorTarget(interaction: ChatInputCommandInteraction): Promise<KumaMonitor | null> {
   // Pausing a Kuma monitor silences its alerts and phone escalation, so it is
   // an admin action (hidden from non-Manage-Server members by default, and
   // checked against ADMIN_USER_IDS here).
   if (!isAdmin(interaction.user.id)) {
     await interaction.reply({ content: ADMINS_ONLY, ephemeral: true });
-    return;
+    return null;
   }
-  if (!ensureConnected(interaction)) return;
-  await interaction.deferReply({ ephemeral: true });
-
-  const monitor = resolveMonitor(interaction);
-  if (!monitor) {
-    await interaction.editReply("Monitor not found.");
-    return;
+  if (!ensureConnected(interaction)) return null;
+  const found = resolveMonitorStrict(kuma.monitors, interaction.options.getString("name", true));
+  if ("error" in found) {
+    await interaction.reply({ content: found.error, ephemeral: true });
+    return null;
   }
+  return found.monitor;
+}
 
-  if (!monitor.active) {
-    await interaction.editReply(`${monitor.name} is already paused.`);
-    return;
-  }
-
-  const res = await kuma.pauseMonitor(monitor.id);
-  if (res.ok) {
-    await interaction.editReply(`\u23F8\uFE0F Paused **${monitor.name}**.`);
-    logger.info({ monitorId: monitor.id, name: monitor.name, user: interaction.user.tag }, "Monitor paused");
-  } else {
-    await interaction.editReply(`Failed to pause: ${res.msg ?? "unknown error"}`);
+/** Post the public confirmation; the ephemeral reply already carries the outcome. */
+async function announce(interaction: ChatInputCommandInteraction, embed: EmbedBuilder): Promise<void> {
+  try {
+    await interaction.followUp({ embeds: [embed], allowedMentions: NO_MENTIONS });
+  } catch (err) {
+    logger.warn({ err }, "Could not post the pause/resume confirmation in the channel");
   }
 }
 
-export async function handleResumeCommand(interaction: ChatInputCommandInteraction): Promise<void> {
-  // Pausing a Kuma monitor silences its alerts and phone escalation, so it is
-  // an admin action (hidden from non-Manage-Server members by default, and
-  // checked against ADMIN_USER_IDS here).
-  if (!isAdmin(interaction.user.id)) {
-    await interaction.reply({ content: ADMINS_ONLY, ephemeral: true });
-    return;
+export async function handlePauseCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const monitor = await adminMonitorTarget(interaction);
+  if (!monitor) return;
+
+  const durationText = interaction.options.getString("duration")?.trim() || null;
+  let durationMs: number | null = null;
+  if (durationText) {
+    durationMs = parseDuration(durationText);
+    if (durationMs === null) {
+      await interaction.reply({
+        content: `Could not read the duration "${durationText.slice(0, 20)}". Use e.g. 30m, 2h, 1d or 1h30m.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    if (durationMs > MAX_PAUSE_MS) {
+      await interaction.reply({
+        content: `The longest pause is ${formatDuration(MAX_PAUSE_MS)}. For longer, use a maintenance window in Uptime Kuma.`,
+        ephemeral: true,
+      });
+      return;
+    }
   }
-  if (!ensureConnected(interaction)) return;
+  const reason = interaction.options.getString("reason")?.trim().slice(0, 300) || null;
+
   await interaction.deferReply({ ephemeral: true });
-
-  const monitor = resolveMonitor(interaction);
-  if (!monitor) {
-    await interaction.editReply("Monitor not found.");
+  const out = await pauseWithSchedule({
+    monitorId: monitor.id,
+    durationMs,
+    reason,
+    userId: interaction.user.id,
+    userTag: interaction.user.tag,
+    channelId: interaction.channelId ?? null,
+  });
+  if (!out.ok) {
+    await interaction.editReply(out.error ?? "Failed to pause.");
     return;
   }
 
-  if (monitor.active) {
-    await interaction.editReply(`${monitor.name} is already active.`);
+  const until = out.resumeAt ? ` until ${discordTime(out.resumeAt)}` : "";
+  const extra = out.paused.length > 1 ? ` and ${out.paused.length - 1} monitor${out.paused.length === 2 ? "" : "s"} in it` : "";
+  await interaction.editReply(
+    `\u23F8\uFE0F ${out.updated ? "Updated the pause of" : "Paused"} **${monitor.name}**${extra}${until}.` +
+    (out.failed.length > 0 ? `\n\u26A0\uFE0F Could not pause: ${out.failed.map((f) => f.monitor.name).join(", ")}` : "")
+  );
+  await announce(interaction, pauseEmbed(out, interaction.user.id, reason ?? getPause(monitor.id)?.reason ?? null));
+}
+
+export async function handleResumeCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  const monitor = await adminMonitorTarget(interaction);
+  if (!monitor) return;
+
+  await interaction.deferReply({ ephemeral: true });
+  const out = await resumeAndClear(monitor.id);
+  if (!out.ok) {
+    await interaction.editReply(out.error ?? "Failed to resume.");
     return;
   }
+  const extra = out.resumed.length > 1 ? ` and ${out.resumed.length - 1} monitor${out.resumed.length === 2 ? "" : "s"} in it` : "";
+  await interaction.editReply(
+    `\u25B6\uFE0F Resumed **${monitor.name}**${extra}.` +
+    (out.failed.length > 0 ? `\n\u26A0\uFE0F Could not resume: ${out.failed.map((f) => f.monitor.name).join(", ")}` : "")
+  );
+  await announce(interaction, resumeEmbed(out, { userId: interaction.user.id }));
+}
 
-  const res = await kuma.resumeMonitor(monitor.id);
-  if (res.ok) {
-    await interaction.editReply(`\u25B6\uFE0F Resumed **${monitor.name}**.`);
-    logger.info({ monitorId: monitor.id, name: monitor.name, user: interaction.user.tag }, "Monitor resumed");
-  } else {
-    await interaction.editReply(`Failed to resume: ${res.msg ?? "unknown error"}`);
+export async function handlePausedCommand(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!ensureConnected(interaction)) return;
+  pruneStalePauses();
+  const lines = pausedLines(kuma.monitors, listPauses());
+  if (lines.length === 0) {
+    await interaction.reply({ content: "No monitors are paused.", ephemeral: true });
+    return;
   }
+  let description = lines.join("\n");
+  if (description.length > 4000) {
+    description = description.slice(0, 3950) + `\n\n*... ${lines.length} total*`;
+  }
+  const embed = new EmbedBuilder()
+    .setTitle(`\u23F8\uFE0F Paused monitors (${lines.length})`)
+    .setDescription(description)
+    .setColor(0xf1c40f)
+    .setFooter({ text: "Admins: /pause <name> [duration] [reason], /resume <name>" })
+    .setTimestamp(new Date());
+  await interaction.reply({ embeds: [embed], ephemeral: true, allowedMentions: NO_MENTIONS });
 }
 
 export async function handleDowntimeCommand(interaction: ChatInputCommandInteraction): Promise<void> {

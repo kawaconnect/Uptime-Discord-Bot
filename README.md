@@ -21,7 +21,8 @@ status board, one alerting pipeline, and a set of slash commands:
   outages, SSL-expiry warnings, and endpoint unreachability. Each alert type,
   `@everyone` mentions, and email are independently toggleable.
 - **Slash commands** - query status, list monitors/sites, pause/resume Kuma
-  monitors, and configure everything at runtime.
+  monitors or whole groups (optionally for a set time), and configure
+  everything at runtime.
 - **Bot presence** - the member-list activity shows a live "X/Y services up".
 - **Kuma resilience** - Kuma v2 can silently stop streaming heartbeats while
   other data keeps flowing; a watchdog tracks heartbeat freshness separately and
@@ -118,7 +119,8 @@ docker run -d --name uptime-bot \
 ```
 
 The image exposes a health endpoint on port `3100` (`/healthz`) and runs as a
-non-root user. Mount a volume at `/app/data` to persist the settings database.
+non-root user. Mount a volume at `/app/data` to persist the settings database
+(which also holds the schedule of timed `/pause` pauses).
 Prebuilt images come from GitLab CI; see
 [Building / Releases (GitLab CI)](#building--releases-gitlab-ci).
 
@@ -195,7 +197,42 @@ Run `/help` in Discord for the full, always-current list. Highlights:
 **Monitoring:** `/status`, `/monitors [filter]`, `/monitor <name>`, `/downtime`,
 `/sg-status`, `/sg-monitors [filter]`, `/sg-downtime`
 
-**Actions:** `/pause <name>` and `/resume <name>` (admin only), `/refresh`, `/sg-refresh`
+**Actions:** `/pause <name> [duration] [reason]`, `/resume <name>` (admin only),
+`/paused`, `/refresh`, `/sg-refresh`
+
+### Pausing a site
+
+`/pause` pauses a monitor in Uptime Kuma itself: Kuma stops checking it, so
+there are no alerts, emails or phone calls for it until it is resumed.
+
+- `/pause name:<site> [duration:2h] [reason:ISP maintenance]` (admin only).
+  `name` autocompletes from the live Kuma monitor list (matching any part of
+  the monitor name or its group name; the group is shown next to each
+  monitor). Text typed without picking from the list must match one monitor
+  exactly or be unique, otherwise it is refused instead of guessed.
+- `duration` takes `30m`, `2h`, `1d`, `1w`, `1h30m`, `2 hours`, or a bare
+  number of minutes, up to 30 days. When it lapses the bot resumes the monitor
+  by itself and posts that in the channel the pause was made from (falling
+  back to the alert channel, then the status-board channel). Without a
+  duration the monitor stays paused until `/resume`.
+- Picking a group (e.g. `NOR`, `SOU`) pauses the group and every active
+  monitor in it. `/resume` on the group resumes exactly the monitors that
+  group pause stopped; monitors that were already paused on their own stay
+  paused.
+- `/pause` on a monitor that is already paused, with a new duration or
+  reason, updates its schedule.
+- `/resume name:<site>` (admin only) resumes it now and drops any schedule.
+- `/paused` (anyone, private reply) lists every paused monitor: who paused it,
+  why and until when. Monitors paused in Kuma's own UI show as "paused in
+  Kuma (no schedule)".
+
+Each pause and resume is announced in the channel (who, what, until when,
+reason); errors (not an admin, unknown site, bad duration, Kuma refusing or
+timing out) are private replies. The schedule is kept in the
+`monitor_pauses` table of `data/bot.db`, so timed pauses survive restarts; a
+pause whose time passed while the bot was down is resumed within a few seconds
+of reconnecting to Kuma. A schedule is dropped if the monitor is resumed (or
+deleted) in Kuma directly.
 
 **Setup (admin only):** `/setup status|alerts|timezone|alerts-toggle|smtp|smtp-test|smtp-clear|show`,
 `/sg-setup connect|disconnect|alerts|alerts-toggle|show|tickets|repeat`, `/sg-pause`,

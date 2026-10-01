@@ -2,6 +2,39 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.0.5] - 2026-10-01
+
+### Added
+- Pause individual sites for a set time. `/pause <name> [duration] [reason]`
+  pauses the monitor in Uptime Kuma (Kuma stops checking it, so no alerts,
+  emails or phone calls), and with a duration such as `30m`, `2h`, `1d` or
+  `1h30m` (up to 30 days) the bot resumes it by itself when the time is up.
+  The schedule is stored in `data/bot.db`, so it survives restarts.
+- Pausing a group (e.g. `NOR`, `SOU`) pauses every active monitor in it;
+  resuming the group resumes exactly those, and leaves monitors that were
+  paused on their own alone.
+- `/paused`: lists paused monitors with who paused them, why, and until when.
+- Pauses and resumes (manual and automatic) are announced in the channel with
+  who, what, until when and the reason. Errors stay private.
+
+### Changed
+- `/pause` and `/resume` autocomplete matches any part of the monitor or group
+  name, shows the group next to each monitor, and offers active monitors for
+  `/pause` and paused ones for `/resume`. Text typed without picking from the
+  list must match one monitor; ambiguous text is refused instead of pausing
+  the first match.
+- `/pause` and `/resume` stay admin-only, exactly as before.
+
+### Security
+- nodemailer 9.1.1 -> 10.0.13 (high-severity advisories in 9.x; the tag
+  pipeline's `npm audit` gate failed on them). The only breaking change in 10
+  is Node.js 20 or newer; the image runs Node 24.
+
+### Notes
+- No deployment change needed: `data/bot.db` lives on the existing
+  `/app/data` volume. No new environment variables.
+- Version 1.0.4 -> 1.0.5 in `package.json`, `package-lock.json`.
+
 ## [1.0.4] - 2026-09-25
 
 CI only; no application changes.

@@ -9,6 +9,7 @@ import { startWebServer } from "./web/server.js";
 import { kuma } from "./services/kuma.js";
 import { startStatusBoard, stopStatusBoard, updateStatusBoard } from "./services/statusBoard.js";
 import { startAlerts, stopAlerts } from "./services/alerts.js";
+import { startPauseScheduler, stopPauseScheduler } from "./services/monitorPauses.js";
 import { phoneCommand } from "./commands/phone.js";
 import { sgPauseCommand } from "./commands/sg-pause.js";
 import { startPresence, stopPresence } from "./services/presence.js";
@@ -21,6 +22,7 @@ import {
   monitorCommand,
   pauseCommand,
   resumeCommand,
+  pausedCommand,
   downtimeCommand,
   refreshCommand,
 } from "./commands/status.js";
@@ -47,6 +49,7 @@ async function deployCommands() {
     monitorCommand.toJSON(),
     pauseCommand.toJSON(),
     resumeCommand.toJSON(),
+    pausedCommand.toJSON(),
     downtimeCommand.toJSON(),
     refreshCommand.toJSON(),
     phoneCommand.toJSON(),
@@ -104,6 +107,10 @@ async function main() {
 
   server = await startWebServer();
 
+  // Auto-resume of timed /pause pauses (schedule kept in data/bot.db).
+  // Started before connecting so the first connect triggers a sweep.
+  startPauseScheduler(client);
+
   // Connect to Uptime Kuma
   kuma.connect();
 
@@ -149,6 +156,7 @@ async function shutdown(signal: string) {
   siteguard.stop();
   stopSgAlerts();
   stopAlerts();
+  stopPauseScheduler();
   stopStatusBoard();
   stopPresence();
   kuma.disconnect();

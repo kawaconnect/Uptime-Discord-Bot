@@ -8,6 +8,7 @@ import {
   handleMonitorCommand,
   handlePauseCommand,
   handleResumeCommand,
+  handlePausedCommand,
   handleDowntimeCommand,
   handleRefreshCommand,
   handleMonitorAutocomplete,
@@ -45,6 +46,7 @@ export function onInteractionCreate(client: Client): void {
         case "monitor": await handleMonitorCommand(interaction); break;
         case "pause": await handlePauseCommand(interaction); break;
         case "resume": await handleResumeCommand(interaction); break;
+        case "paused": await handlePausedCommand(interaction); break;
         case "downtime": await handleDowntimeCommand(interaction); break;
         case "refresh": await handleRefreshCommand(interaction); break;
         case "phone": await handlePhoneCommand(interaction); break;

@@ -29,8 +29,9 @@ export async function handleHelpCommand(
       {
         name: "Actions",
         value: [
-          "`/pause <name>` - Pause a monitor (admin only, autocomplete)",
-          "`/resume <name>` - Resume a paused monitor (admin only, autocomplete)",
+          "`/pause <name> [duration] [reason]` - Pause a monitor or a whole group in Kuma; with a duration (30m, 2h, 1d) it resumes by itself (admin only, autocomplete)",
+          "`/resume <name>` - Resume a paused monitor or group (admin only, autocomplete)",
+          "`/paused` - List paused monitors, who paused them, why and until when",
           "`/refresh` - Force refresh the status board embed",
         ].join("\n"),
         inline: false,

@@ -15,6 +15,21 @@ CREATE TABLE IF NOT EXISTS settings (
   key    TEXT PRIMARY KEY,
   value  TEXT NOT NULL
 );
+
+-- Kuma monitors paused through /pause. One row per monitor while it is
+-- paused by the bot; resume_at (epoch ms) is NULL for an open-ended pause.
+-- group_id is set on children paused together with their group.
+CREATE TABLE IF NOT EXISTS monitor_pauses (
+  monitor_id    INTEGER PRIMARY KEY,
+  monitor_name  TEXT NOT NULL,
+  paused_by     TEXT NOT NULL,
+  paused_by_id  TEXT NOT NULL,
+  reason        TEXT,
+  paused_at     INTEGER NOT NULL,
+  resume_at     INTEGER,
+  channel_id    TEXT,
+  group_id      INTEGER
+);
 `;
 
 let _db: Database.Database | null = null;
@@ -71,6 +86,11 @@ function writeRaw(key: string, value: string): void {
 function db(): Database.Database {
   if (!_db) throw new Error("Database not initialized");
   return _db;
+}
+
+/** The open database, for modules that keep their own tables. */
+export function database(): Database.Database {
+  return db();
 }
 
 export function closeDb(): void {
