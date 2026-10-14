@@ -348,8 +348,11 @@ test("multisite: operational, sub1 down, sub2 https (real SSL probe failure); su
   log("m-health-sub2-https", c);
   const v = await renderViews();
   const board = v.board[0].embeds[0].description as string;
-  assert.match(board, /\*\*sgt-kp-m\.test\*\*/);
-  assert.match(board, /\*\*sgt-kp-m\.test\/sub1\*\*/);
+  // Collapsed WordPress section: one line per origin, only problem sites listed.
+  assert.match(board, /\*\*WordPress \(sgt-kp-m\.test\)\*\*/);
+  assert.match(board, /\*\*sgt-kp-m\.test\/sub2\*\*/, "the failing subsite is named");
+  assert.doesNotMatch(board, /\*\*sgt-kp-m\.test\*\* -/, "operational main site is not listed individually");
+  assert.doesNotMatch(board, /\*\*sgt-kp-m\.test\/sub1\*\*/, "a recovered subsite is not listed individually");
   const d = await pollWith(fresh("m-health-ok"));
   assert.ok(d.events.includes("siteRecovery"));
 });
