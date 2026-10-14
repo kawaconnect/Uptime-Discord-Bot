@@ -17,7 +17,6 @@ import {
   ChatInputCommandInteraction,
   EmbedBuilder,
   MessageFlags,
-  PermissionFlagsBits,
   SlashCommandBuilder,
   StringSelectMenuBuilder,
   StringSelectMenuInteraction,
