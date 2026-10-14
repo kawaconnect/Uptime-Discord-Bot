@@ -333,17 +333,20 @@ class WpopsService extends EventEmitter {
     return m;
   }
 
-  siteForDomain(domain: string): WpSite | null {
-    const d = domain.toLowerCase().replace(/^www\./, "");
+  siteForDomain(domain: string | null | undefined): WpSite | null {
+    if (!domain || typeof domain !== "string") return null;
+    const full = domain.toLowerCase();
+    const d = full.replace(/^www\./, "");
     for (const s of this.sites().values()) {
-      if (s.domains.some((x) => x === domain.toLowerCase() || x.replace(/^www\./, "") === d)) return s;
-      for (const h of Object.values(s.hosts)) if (h.host?.toLowerCase() === domain.toLowerCase()) return s;
+      if (s.domains.some((x) => x === full || x.replace(/^www\./, "") === d)) return s;
+      for (const h of Object.values(s.hosts)) if (h.host?.toLowerCase() === full) return s;
     }
     return null;
   }
 
   /** Is this site currently served by a failover node (any of its domains overridden)? */
-  isSiteInFailover(slugOrDomain: string): boolean {
+  isSiteInFailover(slugOrDomain: string | null | undefined): boolean {
+    if (!slugOrDomain) return false;
     const site = this.sites().get(slugOrDomain) ?? this.siteForDomain(slugOrDomain);
     if (!site) return false;
     return this.activeOverrides().some((o) => o.override.site === site.slug && o.override.status === "active");
