@@ -5,6 +5,8 @@ All notable changes to this project are documented in this file.
 ## [1.1.1] - 2026-10-14
 
 ### Added
+- `/sg-status` states whether the backup is engaged and for which sites
+  (domains, node, since when), or that all sites are on their primary.
 - Discord + e-mail notices for failover applied, rollback and backup applied
   events coming from the node agents (also when triggered outside Discord).
 

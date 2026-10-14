@@ -1,3 +1,4 @@
+import { wpops } from "../services/wpops.js";
 /**
  * SiteGuard slash commands for querying WordPress multisite health.
  * Completely independent from Uptime Kuma commands.
@@ -72,6 +73,22 @@ export async function handleSgStatusCommand(
   if (summary.degraded > 0) lines.push(`${sgStatusEmoji(SgStatus.DEGRADED)} **${summary.degraded}** degraded`);
   if (summary.down > 0) lines.push(`${sgStatusEmoji(SgStatus.DOWN)} **${summary.down}** down`);
   lines.push(`**Total:** ${summary.total} sites`);
+
+  // Backup engagement: which sites are currently served by a backup node.
+  const overrides = wpops.activeOverrides();
+  if (overrides.length > 0) {
+    const bySite = new Map<string, { node: string; domains: string[]; since: number }>();
+    for (const o of overrides) {
+      const cur = bySite.get(o.override.site) ?? { node: o.node, domains: [], since: o.override.switched_at };
+      cur.domains.push(o.domain);
+      bySite.set(o.override.site, cur);
+    }
+    lines.push(`\n\u{1F534} **Backup ENGAGED for ${bySite.size} site${bySite.size > 1 ? "s" : ""}:**`);
+    for (const [slug, v] of bySite) lines.push(`\u2022 **${slug}** \u2192 ${v.node} (${v.domains.join(", ")}) since <t:${v.since}:R>`);
+    lines.push("Roll back with `/wp failover rollback` or the panel.");
+  } else if (wpops.configured) {
+    lines.push("\n\u2705 Backup not engaged - all sites on their primary.");
+  }
 
   if (data.checked_at > 0) {
     lines.push(`\nLast checked: <t:${data.checked_at}:R>`);
