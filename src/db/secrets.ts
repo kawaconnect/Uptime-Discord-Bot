@@ -47,7 +47,7 @@ export function isEncryptedValue(value: string): boolean {
 
 export function encryptValue(plain: string, k: Buffer): string {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", k, iv);
+  const cipher = createCipheriv("aes-256-gcm", k, iv, { authTagLength: 16 });
   const ct = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
   return `${PREFIX}${iv.toString("base64url")}:${tag.toString("base64url")}:${ct.toString("base64url")}`;
@@ -58,7 +58,7 @@ export function decryptValue(stored: string, k: Buffer): string {
   const parts = stored.slice(PREFIX.length).split(":");
   if (parts.length !== 3) throw new Error("malformed encrypted setting");
   const [iv, tag, ct] = parts.map((p) => Buffer.from(p, "base64url"));
-  const decipher = createDecipheriv("aes-256-gcm", k, iv);
+  const decipher = createDecipheriv("aes-256-gcm", k, iv, { authTagLength: 16 });
   decipher.setAuthTag(tag);
   return Buffer.concat([decipher.update(ct), decipher.final()]).toString("utf8");
 }
