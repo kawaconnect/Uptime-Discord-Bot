@@ -297,8 +297,10 @@ function buildStatusEmbed(): EmbedBuilder {
       const stacksOk = Object.values(st.stacks).every((s) => s.healthy);
       const tReady = st.tunnels.filter((t) => t.ready).length;
       const latest = Object.values(st.backups.latest).map((b) => b.pulled_at).filter(Boolean).sort().pop() ?? null;
-      const flag = stacksOk ? sgStatusEmoji(SgStatus.OPERATIONAL) : sgStatusEmoji(SgStatus.DOWN);
-      description += `\n${flag} **${snap.node.name} (backup node)** - stack ${stacksOk ? "healthy" : "PROBLEM"}, tunnels ${tReady}/${st.tunnels.length}, last backup ${fmtAgo(latest)}${st.override_count ? `, \u{1F534} serving ${st.override_count} domain(s)` : ""}`;
+      const lowDisk = (st.disk ?? []).filter((d) => d.low);
+      const flag = stacksOk && !lowDisk.length ? sgStatusEmoji(SgStatus.OPERATIONAL) : stacksOk ? sgStatusEmoji(SgStatus.DEGRADED) : sgStatusEmoji(SgStatus.DOWN);
+      const diskNote = lowDisk.length ? `, \u26A0\uFE0F LOW DISK ${lowDisk.map((d) => `${d.label} ${Math.round(d.free / 2 ** 30)} GB free`).join(", ")}` : "";
+      description += `\n${flag} **${snap.node.name} (backup node)** - stack ${stacksOk ? "healthy" : "PROBLEM"}, tunnels ${tReady}/${st.tunnels.length}, last backup ${fmtAgo(latest)}${diskNote}${st.override_count ? `, \u{1F534} serving ${st.override_count} domain(s)` : ""}`;
     }
   }
 

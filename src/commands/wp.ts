@@ -28,7 +28,7 @@ import { randomBytes } from "node:crypto";
 import { logger } from "../util/logger.js";
 import { getSetting, setSetting } from "../db/index.js";
 import { CAPABILITIES, can, capabilitiesOf, grant, isAdminUser, listGrants, memberRoleIds, revoke, type Capability } from "../services/permissions.js";
-import { getNode, getNodes, saveNodes, wpops, WpopsClient, WpopsError, fmtAgo, fmtBytes, type Selection, type WpPlan } from "../services/wpops.js";
+import { getNode, getNodes, saveNodes, wpops, WpopsClient, WpopsError, fmtAgo, fmtBytes, type Selection, type WpPlan, assertAgentUrl } from "../services/wpops.js";
 
 const EPH = { flags: MessageFlags.Ephemeral } as const;
 const COLOR = { ok: 0x2ecc71, warn: 0xf39c12, bad: 0xe74c3c, info: 0x3498db, red: 0xc0392b } as const;
@@ -172,6 +172,7 @@ function statusEmbed(): EmbedBuilder {
       value: [
         `Stacks: ${stacks}`,
         `Tunnels ready: ${tunnelsOk}/${st.tunnels.length}${tunnelsOk < st.tunnels.length ? ` (missing: ${st.tunnels.filter((t) => !t.ready).map((t) => t.account).join(", ")})` : ""}`,
+        ...(st.disk ?? []).filter((d) => d.low).map((d) => `⚠️ **LOW DISK** ${d.label}: ${fmtBytes(d.free)} free (${d.free_pct}%) - pulls/restores refused`),
         `Backups: ${st.backups.sets} sets, ${fmtBytes(st.backups.disk.free)} free - schedule \`${sched.schedule}\` (keep ${sched.retain_sets}), next ${sched.next_run ? `<t:${sched.next_run}:R>` : "-"}`,
         `Latest:\n${latest}`,
         st.jobs.active.length ? `⏳ Running: ${st.jobs.active.map((j) => `${j.kind} (${j.id})`).join(", ")}` : "",
@@ -379,6 +380,10 @@ async function cmdPerms(i: ChatInputCommandInteraction, sub: string): Promise<vo
   const who = user ? `<@${user.id}>` : `<@&${role!.id}>`;
   if (sub === "grant") {
     const capability = i.options.getString("capability", true) as Capability;
+    if (capability === "admin" && !isAdminUser(i.user.id)) {
+      await i.reply({ content: "Only bot admins (ADMIN_USER_IDS) can grant **admin**; delegated admins may grant view/failover/backup/restore.", ...EPH });
+      return;
+    }
     grant({ guild_id: i.guildId, principal_type, principal_id, capability, granted_by: i.user.id });
     await i.reply({ content: `Granted **${capability}** to ${who}.`, ...EPH });
     return;
@@ -391,7 +396,8 @@ async function cmdPerms(i: ChatInputCommandInteraction, sub: string): Promise<vo
 // -------------------------------------------------------------------- nodes
 
 async function cmdNode(i: ChatInputCommandInteraction, sub: string): Promise<void> {
-  if (!isAdminUser(i.user.id) && !can(i, "admin")) return denied(i, "admin");
+  // Listing is for delegated admins too; adding or removing an agent (URL + token) is bot-admin only.
+  if (sub === "list" ? !isAdminUser(i.user.id) && !can(i, "admin") : !isAdminUser(i.user.id)) return denied(i, "admin");
   if (sub === "list") {
     const nodes = getNodes();
     await i.reply({ content: nodes.length ? nodes.map((n) => `• **${n.name}** - ${n.url}`).join("\n") : "No nodes configured.", ...EPH });
@@ -406,7 +412,7 @@ async function cmdNode(i: ChatInputCommandInteraction, sub: string): Promise<voi
   }
   await i.deferReply(EPH);
   const name = i.options.getString("name", true).trim();
-  const url = i.options.getString("url", true).trim().replace(/\/$/, "");
+  const url = assertAgentUrl(i.options.getString("url", true).trim());
   const token = i.options.getString("token", true).trim();
   const probe = new WpopsClient({ name, url, token });
   const h = await probe.health();
@@ -513,6 +519,8 @@ export async function handleWpButton(i: ButtonInteraction): Promise<void> {
   const [, action, arg] = i.customId.split(":");
   try {
     if (action === "cancel") {
+      const p = pending.get(arg);
+      if (p && p.userId !== i.user.id) { await i.reply({ content: "Only the person who started this action can cancel it.", ...EPH }); return; }
       pending.delete(arg);
       await i.update({ content: "Cancelled.", embeds: [], components: [] });
       return;

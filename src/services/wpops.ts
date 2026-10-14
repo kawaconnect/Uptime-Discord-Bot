@@ -54,6 +54,8 @@ export interface WpNodeStatus {
   overrides: Record<string, WpOverride>;
   override_count: number;
   tunnels: { account: string; tunnel: string | null; ready: boolean }[];
+  /** Every watched filesystem on the node (backups/, each stack's data/). */
+  disk?: { label: string; path: string; total: number; free: number; free_pct: number; low: boolean; min_free_gb: number; min_free_pct: number }[];
   backups: {
     sets: number;
     latest: Record<string, { id: string; set: string; size: number; sites: number; pulled_at: number; label: string }>;
@@ -109,6 +111,22 @@ export class WpopsError extends Error {
 
 // ------------------------------------------------------------------ nodes
 
+/**
+ * Agent URLs must be HTTPS: the bearer token travels in a header. Plain HTTP is
+ * only accepted for loopback / RFC1918 hosts (a LAN-only agent).
+ */
+export function assertAgentUrl(url: string): string {
+  let u: URL;
+  try { u = new URL(url); } catch { throw new WpopsError(`invalid agent URL: ${url}`); }
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  const privateHost = host === "localhost" || /^127\./.test(host) || host === "::1"
+    || /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+  if (u.protocol !== "https:" && !(u.protocol === "http:" && privateHost)) {
+    throw new WpopsError(`agent URL must be https:// (got ${u.protocol}//${host}); the node token would travel in clear text`);
+  }
+  return url.replace(/\/$/, "");
+}
+
 function nodesFromEnv(): WpNode[] {
   const spec = process.env.WPOPS_NODES ?? "";
   const out: WpNode[] = [];
@@ -116,7 +134,12 @@ function nodesFromEnv(): WpNode[] {
     const [name, url] = part.split("=", 2);
     if (!name || !url) continue;
     const token = process.env[`WPOPS_TOKEN_${name.toUpperCase().replace(/-/g, "_")}`] ?? "";
-    if (token) out.push({ name: name.trim(), url: url.trim().replace(/\/$/, ""), token });
+    if (!token) continue;
+    try {
+      out.push({ name: name.trim(), url: assertAgentUrl(url.trim()), token });
+    } catch (err) {
+      logger.error({ err, name }, "WPOPS_NODES entry ignored");
+    }
   }
   return out;
 }

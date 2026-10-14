@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.2] - 2026-10-14
+
+### Security
+- `/wp node add` (and `WPOPS_NODES`) require an `https://` agent URL unless the
+  host is loopback/RFC1918, so node tokens never travel in clear text.
+- Only bot admins (`ADMIN_USER_IDS`) can grant the **admin** capability or
+  add/remove node agents; delegated admins manage view/failover/backup/restore.
+- A pending confirmation can only be cancelled by the user who started it.
+
+### Added
+- Low-disk alerts from nodes (`disk.low` / `disk.ok` events): Discord embed +
+  e-mail; the node line on the status board and `/wp status` flag **LOW DISK**.
+
 ## [1.1.1] - 2026-10-14
 
 ### Added

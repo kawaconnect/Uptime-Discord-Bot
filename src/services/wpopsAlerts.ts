@@ -150,6 +150,23 @@ async function handleEvent(client: Client, node: string, ev: WpEvent): Promise<v
       await post(client, embed, `[WordPress ops] backup applied on ${node}`, `<p>${esc(ev.subject)}</p>`);
       return;
     }
+    case "disk.low": {
+      const gb = (n: unknown) => `${Math.round(Number(n ?? 0) / 2 ** 30)} GB`;
+      const embed = new EmbedBuilder().setTitle(`\u{1F4BE}\u26A0\uFE0F ${node}: LOW DISK - ${ev.label ?? ev.path}`)
+        .setDescription([`${gb(ev.free)} free of ${gb(ev.total)} (${ev.free_pct}%) on \`${ev.path}\``,
+          "Backup pulls and restores on this node are refused until space is freed.",
+          "Free space: **/wp backup list** then delete old sets, or lower the retention with **/wp backup schedule**."].join("\n"))
+        .setColor(COLOR.bad).setTimestamp(ev.ts * 1000);
+      await post(client, embed, `[WordPress ops] LOW DISK on ${node}: ${gb(ev.free)} free`, `<p>${esc(ev.subject)}</p><p>${gb(ev.free)} free of ${gb(ev.total)} on ${esc(ev.path)}. Pulls and restores are refused until space is freed.</p>`);
+      return;
+    }
+    case "disk.ok": {
+      const gb = (n: unknown) => `${Math.round(Number(n ?? 0) / 2 ** 30)} GB`;
+      const embed = new EmbedBuilder().setTitle(`\u{1F4BE}\u2705 ${node}: disk space recovered - ${ev.label ?? ev.path}`)
+        .setDescription(`${gb(ev.free)} free of ${gb(ev.total)} (${ev.free_pct}%) on \`${ev.path}\``).setColor(COLOR.ok).setTimestamp(ev.ts * 1000);
+      await post(client, embed, `[WordPress ops] disk space recovered on ${node}`, `<p>${esc(ev.subject)}</p>`);
+      return;
+    }
     case "scheduler.error":
     case "api.error": {
       const embed = new EmbedBuilder().setTitle(`⚠️ ${node}: agent error`).setDescription(String(ev.error ?? ev.subject ?? "").slice(0, 500)).setColor(COLOR.warn).setTimestamp(ev.ts * 1000);
