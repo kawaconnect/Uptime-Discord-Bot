@@ -311,7 +311,10 @@ class WpopsService extends EventEmitter {
   private detectOverrideChanges(prev: NodeSnapshot | undefined, cur: NodeSnapshot): void {
     const before = Object.keys(prev?.status?.overrides ?? {}).length;
     const after = Object.keys(cur.status?.overrides ?? {}).length;
-    if (prev && before !== after) this.emit("overridesChanged", cur.node.name, before, after);
+    if (prev && before !== after) {
+      logger.info({ node: cur.node.name, before, after }, "wpops: active overrides changed");
+      this.emit("overridesChanged", cur.node.name, before, after);
+    }
   }
 
   // ------------------------------------------------------------- queries

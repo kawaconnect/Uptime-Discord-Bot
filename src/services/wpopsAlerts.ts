@@ -122,6 +122,34 @@ async function handleEvent(client: Client, node: string, ev: WpEvent): Promise<v
       await post(client, embed, `[WordPress ops] scheduled backup FAILED on ${node}`, `<p>${esc(ev.subject)}</p><pre>${esc(ev.body ?? "")}</pre>`);
       return;
     }
+    case "failover.applied": {
+      const domains = Array.isArray(ev.domains) ? (ev.domains as string[]) : [];
+      const failed = Array.isArray(ev.failed) ? (ev.failed as unknown[]) : [];
+      const embed = new EmbedBuilder()
+        .setTitle(`🚑 FAILOVER on ${node}: ${domains.length} domain(s) now on the backup${failed.length ? ` (${failed.length} failed)` : ""}`)
+        .setDescription([`To: **${ev.to}**`, domains.map((d) => `• ${d}`).join("\n") || "none", failed.length ? `Failed: ${JSON.stringify(failed).slice(0, 600)}` : "", `By ${ev.actor ?? "?"}`].filter(Boolean).join("\n"))
+        .setColor(COLOR.bad).setTimestamp(ev.ts * 1000);
+      await post(client, embed, `[WordPress ops] FAILOVER applied on ${node}`, `<p>${esc(ev.subject)}</p><pre>${esc(domains.join("\n"))}</pre>`);
+      void wpops.poll();
+      return;
+    }
+    case "failover.rolledback": {
+      const domains = Array.isArray(ev.domains) ? (ev.domains as string[]) : [];
+      const failed = Array.isArray(ev.failed) ? (ev.failed as unknown[]) : [];
+      const embed = new EmbedBuilder()
+        .setTitle(`↩️ Rollback on ${node}: ${domains.length} domain(s) back on primary${failed.length ? ` (${failed.length} failed)` : ""}`)
+        .setDescription([domains.map((d) => `• ${d}`).join("\n") || "none", failed.length ? `Failed: ${JSON.stringify(failed).slice(0, 600)}` : "", `By ${ev.actor ?? "?"}`].filter(Boolean).join("\n"))
+        .setColor(COLOR.ok).setTimestamp(ev.ts * 1000);
+      await post(client, embed, `[WordPress ops] rollback on ${node}`, `<p>${esc(ev.subject)}</p><pre>${esc(domains.join("\n"))}</pre>`);
+      void wpops.poll();
+      return;
+    }
+    case "restore.applied": {
+      const embed = new EmbedBuilder().setTitle(`🧩 ${node}: backup applied on stack ${ev.stack ?? "?"}`)
+        .setDescription(`Set \`${ev.set}\` restored (${Array.isArray(ev.sites) ? (ev.sites as string[]).join(", ") : ev.sites ?? "all sites"}).`).setColor(COLOR.ok).setTimestamp(ev.ts * 1000);
+      await post(client, embed, `[WordPress ops] backup applied on ${node}`, `<p>${esc(ev.subject)}</p>`);
+      return;
+    }
     case "scheduler.error":
     case "api.error": {
       const embed = new EmbedBuilder().setTitle(`⚠️ ${node}: agent error`).setDescription(String(ev.error ?? ev.subject ?? "").slice(0, 500)).setColor(COLOR.warn).setTimestamp(ev.ts * 1000);

@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.1] - 2026-10-14
+
+### Added
+- Discord + e-mail notices for failover applied, rollback and backup applied
+  events coming from the node agents (also when triggered outside Discord).
+
 ## [1.1.0] - 2026-10-14
 
 ### Added
