@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.3] - 2026-10-14
+
+### Security
+- Settings encryption now pins the AES-GCM auth tag length to 16 bytes on encrypt and decrypt; existing stored values decrypt unchanged.
+- fast-copy 4.0.2 -> 4.1.0 (dev-only, GHSA-jggr-w7fw-pc2j).
+
 ## [1.1.2] - 2026-10-14
 
 ### Security
