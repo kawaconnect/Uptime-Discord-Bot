@@ -22,16 +22,37 @@ import {
 } from "../commands/sg-status.js";
 import { handlePhoneCommand } from "../commands/phone.js";
 import { handleSgPauseCommand, handleSgSiteAutocomplete } from "../commands/sg-pause.js";
+import { handleWpCommand, handleWpAutocomplete, handleWpButton, handleWpSelect, handleWpRestoreAll } from "../commands/wp.js";
 
 export function onInteractionCreate(client: Client): void {
   client.on(Events.InteractionCreate, async (interaction) => {
     // Handle autocomplete
     if (interaction.isAutocomplete()) {
       try {
+        if (interaction.commandName === "wp") { await handleWpAutocomplete(interaction); return; }
         if (interaction.commandName === "sg-pause") await handleSgSiteAutocomplete(interaction);
         else await handleMonitorAutocomplete(interaction);
       } catch (err) {
         logger.debug({ err }, "Autocomplete error");
+      }
+      return;
+    }
+
+    // WordPress ops panel: buttons and select menus (customId "wp:...")
+    if (interaction.isButton() && interaction.customId.startsWith("wp:")) {
+      try {
+        if (interaction.customId.startsWith("wp:restore_all:")) await handleWpRestoreAll(interaction);
+        else await handleWpButton(interaction);
+      } catch (err) {
+        logger.error({ err, customId: interaction.customId }, "wp button error");
+      }
+      return;
+    }
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith("wp:")) {
+      try {
+        await handleWpSelect(interaction);
+      } catch (err) {
+        logger.error({ err, customId: interaction.customId }, "wp select error");
       }
       return;
     }
@@ -58,6 +79,8 @@ export function onInteractionCreate(client: Client): void {
         case "sg-downtime": await handleSgDowntimeCommand(interaction); break;
         case "sg-refresh": await handleSgRefreshCommand(interaction); break;
         case "sg-pause": await handleSgPauseCommand(interaction); break;
+        // WordPress operations (failover / backups / restores)
+        case "wp": await handleWpCommand(interaction); break;
         default:
           await interaction.reply({ content: "Unknown command.", ephemeral: true });
       }

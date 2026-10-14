@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.0] - 2026-10-14
+
+### Added
+- WordPress operations module (`/wp`) driving the wpops node agents
+  (WPMultisiteDocker `scripts/wpops`): failover of down sites, all sites or
+  one site to a backup node, rollback to primary, backup pulls from the
+  primary (weekly schedule and retention set from Discord), applying a
+  pulled backup to all or chosen sites, job listing with logs. Every
+  destructive action shows the exact plan and asks for confirmation.
+- `/wp panel`: a control panel message with buttons and select menus for all
+  of the above, so nothing needs typing. Buttons check permissions on every
+  click; confirmations can only be pressed by the person who started them.
+- Delegated permissions (`/wp perms grant|revoke|list` for users or roles:
+  view, failover, backup, restore, admin), stored in `data/bot.db`.
+  `ADMIN_USER_IDS` always hold everything.
+- Node agents are configured at runtime (`/wp node add <name> <url> <token>`,
+  stored encrypted) or from `WPOPS_NODES` + `WPOPS_TOKEN_<NAME>`.
+- Notifications (Discord + e-mail through the existing SMTP settings) when a
+  backup is pulled or fails, a restore completes, a failover is applied or
+  rolled back, and when a node agent becomes unreachable / reachable.
+  Channel: `/wp setup channel`; e-mail toggle: `/wp setup email`.
+
+### Changed
+- Status board: a red "FAILOVER ACTIVE" banner at the top while any site is
+  served by a backup node, naming the sites and since when. The WordPress
+  section shows one line per origin (primary WordPress, each backup node:
+  stack health, tunnels, last backup) and names only the sites that are
+  down, degraded or close to certificate expiry; `/sg-monitors` keeps the
+  full per-site list.
+- SiteGuard alerts: a site that is in failover is not paged (no @everyone,
+  no reminders, no ticket); one informational notice is posted instead.
+
 ## [1.0.6] - 2026-10-01
 
 ### Added

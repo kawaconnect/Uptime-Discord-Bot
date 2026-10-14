@@ -51,6 +51,19 @@ export async function handleHelpCommand(
         inline: false,
       },
       {
+        name: "WordPress operations (/wp)",
+        value: [
+          "`/wp panel` - Control panel with buttons: failover down/all/one site, rollback, backups, pull, apply",
+          "`/wp status` - Nodes, active failovers, tunnels, latest backups",
+          "`/wp failover down|all|site|rollback` - Move sites to the backup node (with confirmation) or back",
+          "`/wp backup now|list|schedule|keep` - Weekly pulls from the primary; never applied automatically",
+          "`/wp restore <set> [sites]` - Apply a pulled backup to all or chosen sites",
+          "`/wp perms grant|revoke|list` - Delegate view/failover/backup/restore/admin to users or roles",
+          "`/wp node add|remove|list`, `/wp setup channel|email` - Admin setup",
+        ].join("\n"),
+        inline: false,
+      },
+      {
         name: "Auto Features",
         value: [
           "**Status Board** - Unified embed showing Kuma monitors + WordPress health (configure with `/setup status`)",

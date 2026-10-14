@@ -17,6 +17,7 @@ import { getSetting, setSetting } from "../db/index.js";
 import { kuma, MonitorStatus, statusEmoji, statusLabel, type KumaMonitor } from "./kuma.js";
 import { NO_MENTIONS } from "../util/mentions.js";
 import { siteguard, sgStatusEmoji, sgSiteLabel, SgStatus, type SgSite } from "./siteguard.js";
+import { wpops, fmtAgo } from "./wpops.js";
 import { isSgSitePaused } from "./sgSitePauses.js";
 import { discordQueue } from "../queue/index.js";
 
@@ -226,12 +227,6 @@ function buildStatusEmbed(): EmbedBuilder {
   const sgCheckedAt = siteguard.data?.checked_at ?? 0;
   const sgDataStale = !!hasSg && (Date.now() / 1000 - sgCheckedAt) > SG_STALE_THRESHOLD_SEC;
   const sgLines: string[] = [];
-  if (hasSg) {
-    const sorted = [...siteguard.data!.sites].sort((a, b) => sgSiteLabel(a).localeCompare(sgSiteLabel(b)));
-    for (const site of sorted) {
-      sgLines.push(formatSiteLine(site, sgDataStale));
-    }
-  }
 
   // ---- Combined header ----
   const totalUp = kumaSummary.up + sgSummary.operational;
@@ -249,6 +244,19 @@ function buildStatusEmbed(): EmbedBuilder {
 
   // ---- Build description ----
   let description = headerParts.join("  |  ");
+
+  // ---- Failover banner (stays while any override is active) ----
+  const overrides = wpops.activeOverrides();
+  if (overrides.length > 0) {
+    const foSites = new Map<string, { node: string; since: number; count: number }>();
+    for (const o of overrides) {
+      const cur = foSites.get(o.override.site) ?? { node: o.node, since: o.override.switched_at, count: 0 };
+      cur.count++;
+      foSites.set(o.override.site, cur);
+    }
+    const list = [...foSites.entries()].map(([slug, v]) => `${slug} \u2192 ${v.node} (${v.count} domain${v.count > 1 ? "s" : ""}, since <t:${v.since}:R>)`).join("\n");
+    description = `\u{1F534} **FAILOVER ACTIVE - ${foSites.size} site${foSites.size > 1 ? "s" : ""} served by backup**\n${list}\n*Use the WordPress panel or \`/wp failover rollback\` to return to primary.*\n\n` + description;
+  }
 
   // Kuma monitors
   if (kumaLines.length > 0) {
@@ -268,7 +276,30 @@ function buildStatusEmbed(): EmbedBuilder {
     description += `\n\n\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`;
     description += `\n**WordPress Health (${sgSummary.operational}/${sgSummary.total})**`;
     description += `\n${sgHeader.join("  |  ")}`;
-    description += "\n\n" + sgLines.join("\n");
+    // One line per origin instead of every site: down/degraded/expiring ones
+    // are named inline; /sg-monitors still lists everything.
+    const directDown = new Set(siteguard.getDirectDownSites().map((s) => s.site_id));
+    const problem = [...siteguard.data!.sites].filter((s) => s.status !== "operational" || directDown.has(s.site_id) || (s.ssl_expiry_days >= 0 && s.ssl_expiry_days <= 14));
+    const primaryHost = (() => { try { return new URL(siteguard.data!.site_url).host; } catch { return "primary"; } })();
+    description += `\n${sgStatusEmoji(sgSummary.down > 0 ? SgStatus.DOWN : sgSummary.degraded > 0 ? SgStatus.DEGRADED : SgStatus.OPERATIONAL)} **WordPress (${primaryHost})** - ${sgSummary.operational}/${sgSummary.total} sites up`;
+    if (problem.length > 0) {
+      const sorted = problem.sort((a, b) => sgSiteLabel(a).localeCompare(sgSiteLabel(b)));
+      for (const site of sorted) sgLines.push(formatSiteLine(site, sgDataStale));
+      description += "\n" + sgLines.slice(0, 15).join("\n");
+      if (sgLines.length > 15) description += `\n*\u2026 ${sgLines.length - 15} more, see /sg-monitors*`;
+    }
+    for (const snap of wpops.snapshots.values()) {
+      const st = snap.status;
+      if (!st || snap.error) {
+        description += `\n\u26A0\uFE0F **${snap.node.name} (backup node)** - agent unreachable`;
+        continue;
+      }
+      const stacksOk = Object.values(st.stacks).every((s) => s.healthy);
+      const tReady = st.tunnels.filter((t) => t.ready).length;
+      const latest = Object.values(st.backups.latest).map((b) => b.pulled_at).filter(Boolean).sort().pop() ?? null;
+      const flag = stacksOk ? sgStatusEmoji(SgStatus.OPERATIONAL) : sgStatusEmoji(SgStatus.DOWN);
+      description += `\n${flag} **${snap.node.name} (backup node)** - stack ${stacksOk ? "healthy" : "PROBLEM"}, tunnels ${tReady}/${st.tunnels.length}, last backup ${fmtAgo(latest)}${st.override_count ? `, \u{1F534} serving ${st.override_count} domain(s)` : ""}`;
+    }
   }
 
   // Truncate if too long

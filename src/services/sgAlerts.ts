@@ -50,6 +50,7 @@ import { escapeHtml } from "../util/html.js";
 import { mentionsFor, NO_MENTIONS } from "../util/mentions.js";
 import { discordQueue } from "../queue/index.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
+import { wpops } from "./wpops.js";
 import {
   isTicketingConfigured,
   ticketMode,
@@ -188,6 +189,15 @@ function mention(): string {
   return isMentionEnabled() ? "@everyone" : "";
 }
 
+async function sendFailoverNotice(client: Client, site: SgSite): Promise<void> {
+  const embed = new EmbedBuilder()
+    .setTitle(`\u{1F504} ${sgSiteLabel(site)} is on the backup node`)
+    .setDescription(`SiteGuard reports it as ${site.status} (${site.error || `HTTP ${site.http_code}`}) while a failover is active for it. No page is sent; see the failover banner on the status board.`)
+    .setColor(0xe67e22)
+    .setTimestamp();
+  await post(client, embed, false);
+}
+
 /** Send email if SiteGuard email alerts are enabled. Resolves true only on success. */
 async function maybeEmail(subject: string, html: string): Promise<boolean> {
   if (!isEmailEnabled() || !isSmtpConfigured()) return false;
@@ -230,6 +240,13 @@ export function startSgAlerts(client: Client): void {
     downSites.set(site.site_id, site);
     if (isSgSitePaused(site.site_id)) {
       logger.info({ site: sgSiteLabel(site) }, "SG site down while its alerts are paused: not announced");
+      return;
+    }
+    if (wpops.isSiteInFailover(site.domain)) {
+      // Served by the backup node: say so once, quietly (no @everyone, no
+      // reminders, no ticket). The status board banner is the loud part.
+      logger.info({ site: sgSiteLabel(site) }, "SG site down while in failover: informational notice only");
+      sendFailoverNotice(client, site).catch((err) => logger.error({ err }, "Failed to send failover notice"));
       return;
     }
     markDown(`sg:site:${site.site_id}`);
@@ -347,6 +364,7 @@ async function reportDownSitesToPbx(): Promise<void> {
 
   for (const site of downSites.values()) {
     const key = `sg:site:${site.site_id}`;
+    if (wpops.isSiteInFailover(site.domain)) continue;
     if (isSgSitePaused(site.site_id)) {
       await markUp(key).catch(() => undefined); // stop any call already in progress
       continue;
@@ -437,7 +455,7 @@ export async function runReminders(client: Client): Promise<void> {
       }
     }
     // Sites whose alerts are paused are left out of the reminder.
-    const active = [...downSites.values()].filter((site) => !isSgSitePaused(site.site_id));
+    const active = [...downSites.values()].filter((site) => !isSgSitePaused(site.site_id) && !wpops.isSiteInFailover(site.domain));
     if (active.length === 0) return;
 
     const oldest = Math.min(...active.map((site) => lastSentAt.get(`site:${site.site_id}`) ?? 0));

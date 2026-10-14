@@ -274,6 +274,22 @@ deleted) in Kuma directly.
 URLs (plain http only for localhost/`.test` development hosts, and in-cluster
 `*.svc` names for Zammad).
 
+
+### WordPress operations (`/wp`)
+
+Requires at least one wpops node agent (see WPMultisiteDocker
+`docs/wpops-design.md`). Add it with `/wp node add <name> <url> <token>`.
+
+| Command | Permission | Purpose |
+|---|---|---|
+| `/wp panel` | view | Control panel with buttons: failover down/all/one site, rollback, backups, pull now, apply backup, jobs |
+| `/wp status`, `/wp sites [live]`, `/wp jobs [id]` | view | Nodes, overrides, tunnels, backups; inventory and live DNS; job logs |
+| `/wp failover down\|all\|site\|rollback` | failover | Plan is shown first; a confirm button applies it |
+| `/wp backup now\|list\|schedule\|keep` | backup (list: view) | Pull from the primary; weekly schedule and retention |
+| `/wp restore <set> [sites] [stack]` | restore | Apply a pulled set (never automatic) |
+| `/wp perms grant\|revoke\|list` | admin | Delegate to users or roles |
+| `/wp node add\|remove\|list`, `/wp setup channel\|email` | admin | Agents and notification settings |
+
 ## HTTP endpoints
 
 | Path | Purpose |

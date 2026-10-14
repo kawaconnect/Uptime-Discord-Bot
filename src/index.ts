@@ -12,6 +12,9 @@ import { startAlerts, stopAlerts } from "./services/alerts.js";
 import { startPauseScheduler, stopPauseScheduler } from "./services/monitorPauses.js";
 import { phoneCommand } from "./commands/phone.js";
 import { sgPauseCommand } from "./commands/sg-pause.js";
+import { wpCommand, refreshPanel } from "./commands/wp.js";
+import { wpops } from "./services/wpops.js";
+import { startWpopsAlerts } from "./services/wpopsAlerts.js";
 import { startPresence, stopPresence } from "./services/presence.js";
 import { configureSmtp } from "./services/email.js";
 import { setupCommand } from "./commands/setup.js";
@@ -64,6 +67,7 @@ async function deployCommands() {
     sgDowntimeCommand.toJSON(),
     sgRefreshCommand.toJSON(),
     sgPauseCommand.toJSON(),
+    wpCommand.toJSON(),
   );
 
   const rest = new REST().setToken(config.DISCORD_TOKEN);
@@ -144,6 +148,16 @@ async function main() {
     logger.warn("SiteGuard health monitor not configured - use /sg-setup connect <url> <api_key>");
   }
 
+  // WordPress node agents (failover / backups). Nodes come from the DB
+  // (/wp node add) or WPOPS_NODES + WPOPS_TOKEN_<NAME> in the environment.
+  startWpopsAlerts(client);
+  wpops.on("overridesChanged", () => {
+    refreshPanel(client).catch(() => undefined);
+    updateStatusBoard(client).catch(() => undefined);
+  });
+  wpops.start();
+  if (!wpops.configured) logger.warn("No WordPress node agents configured - /wp commands are inactive until /wp node add");
+
   logger.info("Bot started - waiting for Uptime Kuma connection");
 }
 
@@ -154,6 +168,7 @@ async function main() {
 async function shutdown(signal: string) {
   logger.info({ signal }, "Shutting down");
   siteguard.stop();
+  wpops.stop();
   stopSgAlerts();
   stopAlerts();
   stopPauseScheduler();

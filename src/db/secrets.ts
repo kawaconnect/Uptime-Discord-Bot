@@ -23,6 +23,7 @@ export const SECRET_SETTING_KEYS: ReadonlySet<string> = new Set([
   "SMTP_PASS",
   "PBX_ALERT_TOKEN",
   "KUMA_PASSWORD",
+  "WPOPS_NODES",
 ]);
 
 const PREFIX = "enc:v1:";
