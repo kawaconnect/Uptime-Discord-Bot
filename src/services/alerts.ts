@@ -8,6 +8,9 @@
  *
  * Each alert type can be toggled via /setup alerts-toggle.
  * @everyone and email are independently configurable (default: both OFF for Kuma).
+ * During a maintenance window (/maintenance, see maintenance.ts) none of
+ * these go out; each one held back is counted, and monitors still down when
+ * the window ends are alerted then (realertKumaAfterMaintenance).
  */
 
 import {
@@ -23,6 +26,7 @@ import { escapeHtml } from "../util/html.js";
 import { mentionsFor, NO_MENTIONS } from "../util/mentions.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 import { isPhoneEscalationEnabled, markDown, markUp, reportActive, trackedKeys } from "./phone.js";
+import { suppressedByMaintenance } from "./maintenance.js";
 
 const ALERT_CHANNEL_KEY = "ALERT_CHANNEL_ID";
 const DISCONNECT_GRACE_MS = 30_000;
@@ -35,6 +39,8 @@ let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let wasDisconnected = false;
 /** Guard against double-registration of Kuma event listeners. */
 let alertsStarted = false;
+/** Monitors whose current outage has been announced (cleared on recovery). */
+const downAnnounced = new Set<number>();
 
 /** Stops the escalation sweep. Called on shutdown. */
 export function stopAlerts(): void {
@@ -111,6 +117,7 @@ export function startAlerts(client: Client): void {
     disconnectTimer = setTimeout(() => {
       wasDisconnected = true;
       if (!isEnabled("disconnect")) return;
+      if (suppressedByMaintenance("kuma-disconnect", { reason })) return;
       sendDisconnectAlert(client, reason).catch((err) =>
         logger.error({ err }, "Failed to send disconnect alert")
       );
@@ -124,6 +131,7 @@ export function startAlerts(client: Client): void {
     }
     if (wasDisconnected) {
       wasDisconnected = false;
+      if (suppressedByMaintenance("kuma-reconnect")) return;
       sendReconnectedAlert(client).catch((err) =>
         logger.error({ err }, "Failed to send reconnected alert")
       );
@@ -133,12 +141,14 @@ export function startAlerts(client: Client): void {
   // ---- Data staleness (silent failure - the most dangerous kind) ----
   kuma.on("dataStale", (stalenessMs: number) => {
     if (!isEnabled("disconnect")) return;
+    if (suppressedByMaintenance("kuma-stale", { stalenessMs })) return;
     sendStaleAlert(client, stalenessMs).catch((err) =>
       logger.error({ err }, "Failed to send stale data alert")
     );
   });
 
   kuma.on("dataFresh", () => {
+    if (suppressedByMaintenance("kuma-fresh")) return;
     sendStaleRecoveredAlert(client).catch((err) =>
       logger.error({ err }, "Failed to send stale recovery alert")
     );
@@ -146,13 +156,16 @@ export function startAlerts(client: Client): void {
 
   // ---- Monitor status changes ----
   kuma.on("statusChange", (monitor: KumaMonitor, heartbeat: KumaHeartbeat, previousStatus: number | undefined) => {
+    if (heartbeat.status === MonitorStatus.UP) downAnnounced.delete(monitor.id);
     if (heartbeat.status === MonitorStatus.DOWN && isEnabled("down")) {
+      markDown(`kuma:monitor:${monitor.id}`);
+      if (suppressedByMaintenance("kuma-down", { monitorId: monitor.id, name: monitor.name })) return;
       sendDownAlert(client, monitor, heartbeat).catch((err) =>
         logger.error({ err, monitorId: monitor.id }, "Failed to send down alert")
       );
-      markDown(`kuma:monitor:${monitor.id}`);
     } else if (heartbeat.status === MonitorStatus.UP && previousStatus === MonitorStatus.DOWN && isEnabled("recovery")) {
       markUp(`kuma:monitor:${monitor.id}`).catch(() => undefined);
+      if (suppressedByMaintenance("kuma-recovery", { monitorId: monitor.id, name: monitor.name })) return;
       sendRecoveryAlert(client, monitor, heartbeat).catch((err) =>
         logger.error({ err, monitorId: monitor.id }, "Failed to send recovery alert")
       );
@@ -304,9 +317,49 @@ async function sendStaleRecoveredAlert(client: Client): Promise<void> {
   );
 }
 
+/** Monitors that are down and would alert: active, not in a paused group, not in a Kuma maintenance. */
+export function alertableDownMonitors(): KumaMonitor[] {
+  return kuma.getDownMonitors()
+    .map(({ monitor }) => monitor)
+    .filter((m) => !kuma.isEffectivelyPaused(m.id) && kuma.latestStatus.get(m.id) !== MonitorStatus.MAINTENANCE);
+}
+
+/**
+ * After a maintenance window: alert every monitor still down whose outage was
+ * not announced (it went down during the window, or before a restart), as a
+ * normal down alert. If Uptime Kuma has been unreachable for longer than the
+ * disconnect grace, the disconnect alert goes out instead. Returns the number of alerts sent.
+ */
+export async function realertKumaAfterMaintenance(client: Client): Promise<number> {
+  if (!kuma.connected) {
+    // Only once the 30 s grace has passed; a shorter blip is still covered by
+    // the running grace timer, which alerts normally now the window is over.
+    if (!wasDisconnected || !isEnabled("disconnect")) return 0;
+    await sendDisconnectAlert(client, "still disconnected when the maintenance window ended");
+    return 1;
+  }
+  if (!isEnabled("down")) return 0;
+  let n = 0;
+  for (const monitor of alertableDownMonitors()) {
+    if (downAnnounced.has(monitor.id)) continue;
+    markDown(`kuma:monitor:${monitor.id}`);
+    await sendDownAlert(client, monitor, {
+      monitorID: monitor.id,
+      status: MonitorStatus.DOWN,
+      time: new Date().toISOString(),
+      msg: "Still down when the maintenance window ended",
+      ping: null,
+      important: true,
+    });
+    n++;
+  }
+  return n;
+}
+
 async function sendDownAlert(client: Client, monitor: KumaMonitor, heartbeat: KumaHeartbeat): Promise<void> {
   const channel = await getAlertChannel(client);
   if (!channel) return;
+  downAnnounced.add(monitor.id);
 
   const target = monitor.url || monitor.hostname || "N/A";
   const embed = new EmbedBuilder()

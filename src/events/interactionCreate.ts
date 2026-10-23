@@ -22,6 +22,7 @@ import {
 } from "../commands/sg-status.js";
 import { handlePhoneCommand } from "../commands/phone.js";
 import { handleSgPauseCommand, handleSgSiteAutocomplete } from "../commands/sg-pause.js";
+import { handleMaintenanceCommand } from "../commands/maintenance.js";
 import { handleWpCommand, handleWpAutocomplete, handleWpButton, handleWpSelect, handleWpRestoreAll } from "../commands/wp.js";
 
 export function onInteractionCreate(client: Client): void {
@@ -72,6 +73,7 @@ export function onInteractionCreate(client: Client): void {
         case "downtime": await handleDowntimeCommand(interaction); break;
         case "refresh": await handleRefreshCommand(interaction); break;
         case "phone": await handlePhoneCommand(interaction); break;
+        case "maintenance": await handleMaintenanceCommand(interaction); break;
         // SiteGuard commands
         case "sg-setup": await handleSgSetupCommand(interaction); break;
         case "sg-status": await handleSgStatusCommand(interaction); break;

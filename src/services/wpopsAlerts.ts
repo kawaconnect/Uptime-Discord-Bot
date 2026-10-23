@@ -4,6 +4,8 @@
  * node agent unreachable / back. Posts go to WP_ALERT_CHANNEL_ID, falling
  * back to the SiteGuard alert channel, the Kuma alert channel, then the
  * status board channel. E-mail uses the bot's SMTP settings (/setup smtp).
+ * None of them go out during a maintenance window (/maintenance); each one
+ * held back is logged and counted in the window's summary.
  */
 
 import { Client, EmbedBuilder, TextChannel } from "discord.js";
@@ -12,6 +14,7 @@ import { getSetting } from "../db/index.js";
 import { discordQueue } from "../queue/index.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 import { wpops, fmtBytes, type WpEvent, type WpJob } from "./wpops.js";
+import { suppressedByMaintenance } from "./maintenance.js";
 
 const COLOR = { ok: 0x2ecc71, warn: 0xf39c12, bad: 0xe74c3c, info: 0x3498db } as const;
 
@@ -36,6 +39,7 @@ function emailEnabled(): boolean {
 }
 
 async function post(client: Client, embed: EmbedBuilder, subject: string, html: string, email = true): Promise<void> {
+  if (suppressedByMaintenance("wpops", { subject })) return;
   const ch = await channel(client);
   if (ch) {
     try {

@@ -44,6 +44,21 @@ CREATE TABLE IF NOT EXISTS sg_site_pauses (
   resume_at     INTEGER,
   channel_id    TEXT
 );
+
+-- Global maintenance window started through /maintenance start. At most one
+-- row (id = 1) while a window is open; ends_at is epoch ms. suppressed counts
+-- the alerts held back so far, suppressed_kinds breaks that down (JSON).
+CREATE TABLE IF NOT EXISTS maintenance_window (
+  id                INTEGER PRIMARY KEY CHECK (id = 1),
+  started_by        TEXT NOT NULL,
+  started_by_id     TEXT NOT NULL,
+  reason            TEXT,
+  started_at        INTEGER NOT NULL,
+  ends_at           INTEGER NOT NULL,
+  channel_id        TEXT,
+  suppressed        INTEGER NOT NULL DEFAULT 0,
+  suppressed_kinds  TEXT NOT NULL DEFAULT '{}'
+);
 `;
 
 let _db: Database.Database | null = null;

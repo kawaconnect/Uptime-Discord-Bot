@@ -12,6 +12,8 @@ import { startAlerts, stopAlerts } from "./services/alerts.js";
 import { startPauseScheduler, stopPauseScheduler } from "./services/monitorPauses.js";
 import { phoneCommand } from "./commands/phone.js";
 import { sgPauseCommand } from "./commands/sg-pause.js";
+import { maintenanceCommand } from "./commands/maintenance.js";
+import { startMaintenanceScheduler, stopMaintenanceScheduler } from "./services/maintenanceRun.js";
 import { wpCommand, refreshPanel } from "./commands/wp.js";
 import { wpops } from "./services/wpops.js";
 import { startWpopsAlerts } from "./services/wpopsAlerts.js";
@@ -56,6 +58,7 @@ async function deployCommands() {
     downtimeCommand.toJSON(),
     refreshCommand.toJSON(),
     phoneCommand.toJSON(),
+    maintenanceCommand.toJSON(),
   ];
 
   // SiteGuard commands - always registered so /sg-setup connect can be used
@@ -95,7 +98,7 @@ async function main() {
   loadEnv();
   logger.info("Environment validated");
   if (env().ADMIN_USER_IDS.length === 0) {
-    logger.warn("ADMIN_USER_IDS is empty: admin commands (/setup, /sg-setup, /sg-pause, /pause, /resume, /phone toggle) are refused for everyone");
+    logger.warn("ADMIN_USER_IDS is empty: admin commands (/setup, /sg-setup, /sg-pause, /maintenance, /pause, /resume, /phone toggle) are refused for everyone");
   }
 
   const dbPath = join(process.cwd(), "data", "bot.db");
@@ -114,6 +117,8 @@ async function main() {
   // Auto-resume of timed /pause pauses (schedule kept in data/bot.db).
   // Started before connecting so the first connect triggers a sweep.
   startPauseScheduler(client);
+  // End of a /maintenance window (kept in data/bot.db, so it survives restarts).
+  startMaintenanceScheduler(client);
 
   // Connect to Uptime Kuma
   kuma.connect();
@@ -172,6 +177,7 @@ async function shutdown(signal: string) {
   stopSgAlerts();
   stopAlerts();
   stopPauseScheduler();
+  stopMaintenanceScheduler();
   stopStatusBoard();
   stopPresence();
   kuma.disconnect();

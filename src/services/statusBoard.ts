@@ -19,6 +19,7 @@ import { NO_MENTIONS } from "../util/mentions.js";
 import { siteguard, sgStatusEmoji, sgSiteLabel, SgStatus, type SgSite } from "./siteguard.js";
 import { wpops, fmtAgo } from "./wpops.js";
 import { isSgSitePaused } from "./sgSitePauses.js";
+import { maintenanceBanner } from "./maintenance.js";
 import { discordQueue } from "../queue/index.js";
 
 const STATUS_CHANNEL_KEY = "STATUS_CHANNEL_ID";
@@ -257,6 +258,10 @@ function buildStatusEmbed(): EmbedBuilder {
     const list = [...foSites.entries()].map(([slug, v]) => `${slug} \u2192 ${v.node} (${v.count} domain${v.count > 1 ? "s" : ""}, since <t:${v.since}:R>)`).join("\n");
     description = `\u{1F534} **FAILOVER ACTIVE - ${foSites.size} site${foSites.size > 1 ? "s" : ""} served by backup**\n${list}\n*Use the WordPress panel or \`/wp failover rollback\` to return to primary.*\n\n` + description;
   }
+
+  // ---- Maintenance banner (while a /maintenance window is open) ----
+  const maint = maintenanceBanner();
+  if (maint) description = `${maint}\n\n` + description;
 
   // Kuma monitors
   if (kumaLines.length > 0) {

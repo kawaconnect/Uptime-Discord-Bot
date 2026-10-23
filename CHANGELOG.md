@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.4] - 2026-10-23
+
+### Added
+- `/maintenance start duration:<2h> [reason]`, `/maintenance end` and
+  `/maintenance status`: a maintenance window that pauses every alert the bot
+  sends (Discord alerts, `@everyone`, email, Zammad tickets and phone calls,
+  for Uptime Kuma, SiteGuard and the WordPress node agents) for a set time,
+  up to 7 days. Admin only (status is open). Starting it posts one notice to
+  the alert channel with who, reason and end time; running phone escalations
+  are cleared.
+- The window is stored in `data/bot.db` and survives restarts. It ends by
+  itself (or early with `/maintenance end`) and posts one summary: when it
+  ended, who started it, the reason, how many alerts were suppressed and what
+  is still down. Monitors and sites still down then alert normally, and phone
+  escalation starts over.
+- Status board banner while a window is open.
+
 ## [1.1.3] - 2026-10-14
 
 ### Security

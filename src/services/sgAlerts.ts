@@ -26,7 +26,9 @@
  * Each alert type can be toggled via /sg-setup alerts-toggle. Alerts for a
  * single site can be paused with /sg-pause site (see sgSitePauses.ts): its
  * down/recovery/SSL alerts, reminders, tickets and phone calls are skipped
- * while its state keeps being tracked.
+ * while its state keeps being tracked. A global maintenance window
+ * (/maintenance, see maintenance.ts) holds back every alert, ticket and call
+ * here; what is still down when it ends is alerted then (realertSgAfterMaintenance).
  * @everyone and email are independently configurable (default: both ON for SiteGuard).
  */
 
@@ -67,6 +69,7 @@ import {
   sgSiteResumeEmbed,
   type SgSitePause,
 } from "./sgSitePauses.js";
+import { isMaintenanceActive, suppressedByMaintenance } from "./maintenance.js";
 
 const SG_ALERT_CHANNEL_KEY = "SG_ALERT_CHANNEL_ID";
 const REMINDER_TICK_MS = 60_000;
@@ -91,6 +94,7 @@ export function setSgPaused(paused: boolean): void {
 
 function isSgEnabled(type: string): boolean {
   if (isSgPaused()) return false;
+  if (isMaintenanceActive()) return false;
   return getSetting(`SG_ALERT_${type.toUpperCase()}_ENABLED`) !== "false";
 }
 
@@ -116,7 +120,7 @@ function isTicketsEnabled(): boolean {
  * does both. Returns a Discord line describing where the ticket went.
  */
 async function deliverIncident(incidentKey: string, subject: string, html: string): Promise<string> {
-  if (isSgPaused()) return "";
+  if (isSgPaused() || isMaintenanceActive()) return "";
   const emailed = await maybeEmail(subject, html);
   const mode = ticketMode();
   const wantApi = isTicketsEnabled() && (mode === "always" || (mode === "fallback" && !emailed));
@@ -242,6 +246,10 @@ export function startSgAlerts(client: Client): void {
       logger.info({ site: sgSiteLabel(site) }, "SG site down while its alerts are paused: not announced");
       return;
     }
+    if (!isSgPaused() && suppressedByMaintenance(wpops.isSiteInFailover(site.domain) ? "sg-failover" : "sg-site-down", { site: sgSiteLabel(site) })) {
+      if (!wpops.isSiteInFailover(site.domain)) markDown(`sg:site:${site.site_id}`);
+      return;
+    }
     if (wpops.isSiteInFailover(site.domain)) {
       // Served by the backup node: say so once, quietly (no @everyone, no
       // reminders, no ticket). The status board banner is the loud part.
@@ -263,7 +271,7 @@ export function startSgAlerts(client: Client): void {
     markUp(`sg:site:${site.site_id}`).catch(() => undefined);
     sslExpiring.delete(site.site_id);
     sslEscalated.delete(site.site_id);
-    if (isSgSitePaused(site.site_id)) {
+    if (isSgSitePaused(site.site_id) || (!isSgPaused() && suppressedByMaintenance("sg-site-recovery", { site: sgSiteLabel(site) }))) {
       // Not announced, but a ticket opened before the pause is still closed.
       logger.info({ site: sgSiteLabel(site) }, "SG site recovered while its alerts are paused: not announced");
       if (isTicketingConfigured()) {
@@ -283,6 +291,7 @@ export function startSgAlerts(client: Client): void {
     sslExpiring.set(site.site_id, site);
     if (isSgSitePaused(site.site_id)) return;
     markDown(`sg:ssl:${site.site_id}`);
+    if (!isSgPaused() && suppressedByMaintenance("sg-ssl", { site: sgSiteLabel(site) })) return;
     if (!isSgEnabled("SSL_EXPIRING")) return;
     sendSslExpiringAlert(client, site).catch((err) =>
       logger.error({ err, site: sgSiteLabel(site) }, "Failed to send SG SSL alert")
@@ -293,6 +302,7 @@ export function startSgAlerts(client: Client): void {
   siteguard.on("unreachable", (errorMsg: string, kind: SgErrorKind | "" = "") => {
     unreachableKind = kind;
     if (!isConfigErrorKind(kind)) markDown("sg:unreachable");
+    if (!isSgPaused() && suppressedByMaintenance("sg-unreachable", { error: errorMsg, kind })) return;
     if (!isSgEnabled("WP_UNREACHABLE")) return;
     sendUnreachableAlert(client, errorMsg, kind).catch((err) =>
       logger.error({ err }, "Failed to send SG unreachable alert")
@@ -305,6 +315,7 @@ export function startSgAlerts(client: Client): void {
     markUp("sg:unreachable").catch(() => undefined);
     lastSentAt.delete("unreachable");
     if (isSgPaused()) return;
+    if (suppressedByMaintenance("sg-reachable")) return;
     sendReachableAlert(client, previousKind).catch((err) =>
       logger.error({ err }, "Failed to send SG reachable alert")
     );
@@ -313,6 +324,7 @@ export function startSgAlerts(client: Client): void {
   // ---- SSL probe failed (SiteGuard could not read the certificate) ----
   siteguard.on("sslProbeFailed", (site: SgSite, message: string) => {
     if (isSgSitePaused(site.site_id)) return;
+    if (!isSgPaused() && suppressedByMaintenance("sg-ssl", { site: sgSiteLabel(site), probe: true })) return;
     if (!isSgEnabled("SSL_EXPIRING")) return;
     sendSslProbeFailedAlert(client, site, message).catch((err) =>
       logger.error({ err, site: sgSiteLabel(site) }, "Failed to send SG SSL probe alert")
@@ -323,6 +335,7 @@ export function startSgAlerts(client: Client): void {
   siteguard.on("dataStale", (ageSec: number) => {
     dataStaleSince = dataStaleSince ?? Date.now();
     markDown("sg:data-stale");
+    if (!isSgPaused() && suppressedByMaintenance("sg-data-stale", { ageSec })) return;
     if (!isSgEnabled("DATA_STALE")) return;
     sendDataStaleAlert(client, ageSec).catch((err) =>
       logger.error({ err }, "Failed to send SG stale-data alert")
@@ -332,6 +345,7 @@ export function startSgAlerts(client: Client): void {
     dataStaleSince = null;
     markUp("sg:data-stale").catch(() => undefined);
     lastSentAt.delete("stale");
+    if (suppressedByMaintenance("sg-data-fresh")) return;
     sendDataFreshAlert(client).catch((err) =>
       logger.error({ err }, "Failed to send SG data-fresh alert")
     );
@@ -360,6 +374,7 @@ export function startSgAlerts(client: Client): void {
  */
 async function reportDownSitesToPbx(): Promise<void> {
   if (isSgPaused()) return;
+  if (isMaintenanceActive()) return; // no calls; still-down sites escalate once the window ends
   if (!isPhoneEscalationEnabled()) return;
 
   for (const site of downSites.values()) {
@@ -817,4 +832,41 @@ export async function announceSiteResume(
   }
   if (isSgPaused()) return; // all of SiteGuard is paused: nothing alerts
   await alertSiteAfterResume(client, p.siteId);
+}
+
+// ---------------------------------------------------------------
+// After a maintenance window
+// ---------------------------------------------------------------
+
+/** Labels of the sites that are down and would alert (not paused, not on the backup node). */
+export function alertableDownSites(): string[] {
+  if (isSgPaused()) return [];
+  return siteguard.getDownSites()
+    .filter((s) => !isSgSitePaused(s.site_id) && !wpops.isSiteInFailover(s.domain))
+    .map((s) => sgSiteLabel(s) || s.url);
+}
+
+/**
+ * After a maintenance window: alert every site still down whose outage was
+ * not announced (normal down alert, ticket, and phone escalation from then
+ * on), and an unreachable endpoint or stale data that was held back. Outages
+ * announced before the window carry on with their reminders. Returns the
+ * number of alerts sent.
+ */
+export async function realertSgAfterMaintenance(client: Client): Promise<number> {
+  if (isSgPaused()) return 0;
+  let n = 0;
+  for (const site of siteguard.getDownSites()) {
+    if (isSgSitePaused(site.site_id) || wpops.isSiteInFailover(site.domain)) continue;
+    if (await alertSiteAfterResume(client, site.site_id)) n++;
+  }
+  if (siteguard.isConfigured && !siteguard.reachable && siteguard.unreachableSince > 0 && !lastSentAt.has("unreachable") && isSgEnabled("WP_UNREACHABLE")) {
+    await sendUnreachableAlert(client, siteguard.lastError || "unreachable", unreachableKind);
+    n++;
+  }
+  if (dataStaleSince !== null && !lastSentAt.has("stale") && isSgEnabled("DATA_STALE")) {
+    await sendDataStaleAlert(client, Math.floor((Date.now() - dataStaleSince) / 1000));
+    n++;
+  }
+  return n;
 }

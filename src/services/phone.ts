@@ -10,6 +10,7 @@
 
 import { logger } from "../util/logger.js";
 import { getSettingOrEnv, setSetting } from "../db/index.js";
+import { isMaintenanceActive } from "./maintenance.js";
 
 /** Conditions currently down, and when we first saw them go down. */
 const activeSince = new Map<string, number>();
@@ -136,6 +137,9 @@ export async function reportActive(
   kind: CallKind = "kuma-down",
 ): Promise<void> {
   if (!isPhoneEscalationEnabled()) return;
+  // A maintenance window rings nobody. The condition stays tracked, so it
+  // escalates normally if it is still down once the window ends.
+  if (isMaintenanceActive()) return;
   if (!isCallEnabledFor(kind)) return;
   const cfg = config();
   if (!cfg) return;

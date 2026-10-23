@@ -32,6 +32,8 @@ export async function handleHelpCommand(
           "`/pause <name> [duration] [reason]` - Pause a monitor or a whole group in Kuma; with a duration (30m, 2h, 1d) it resumes by itself (admin only, autocomplete)",
           "`/resume <name>` - Resume a paused monitor or group (admin only, autocomplete)",
           "`/paused` - List paused monitors, who paused them, why and until when",
+          "`/maintenance start <duration> [reason]` - Pause ALL alerts, pings, e-mails, tickets and phone calls (Kuma, SiteGuard, WordPress nodes) for e.g. 2h; ends by itself, then anything still down alerts (admin only)",
+          "`/maintenance end` - End the window early \u00b7 `/maintenance status` - Is one active, until when, how many alerts held back",
           "`/refresh` - Force refresh the status board embed",
         ].join("\n"),
         inline: false,

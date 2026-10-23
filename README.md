@@ -20,6 +20,10 @@ status board, one alerting pipeline, and a set of slash commands:
   going down/recovering, Kuma disconnects, silent data-staleness, WordPress site
   outages, SSL-expiry warnings, and endpoint unreachability. Each alert type,
   `@everyone` mentions, and email are independently toggleable.
+- **Maintenance window** - `/maintenance start duration:2h reason:...` pauses
+  every alert, `@everyone` ping, email, ticket and phone call for a set time
+  (Kuma, SiteGuard and the WordPress node agents alike); it ends by itself,
+  posts a summary, and anything still down then alerts normally.
 - **Slash commands** - query status, list monitors/sites, pause/resume Kuma
   monitors or whole groups (optionally for a set time), and configure
   everything at runtime.
@@ -199,7 +203,54 @@ Run `/help` in Discord for the full, always-current list. Highlights:
 
 **Actions:** `/pause <name> [duration] [reason]`, `/resume <name>` (admin only),
 `/paused`, `/sg-pause site <site> [duration] [reason]`, `/sg-pause site-resume <site>`
-(admin only), `/refresh`, `/sg-refresh`
+(admin only), `/maintenance start <duration> [reason]`, `/maintenance end`
+(admin only), `/maintenance status`, `/refresh`, `/sg-refresh`
+
+### Maintenance window (pause all alerts and calls)
+
+For planned work that will take things down (hypervisor upgrades, a network
+change), one command silences everything the bot would otherwise raise:
+
+- `/maintenance start duration:2h reason:proxmox upgrades` (admin only).
+  `duration` is required and takes the same forms as `/pause`: `30m`, `2h`,
+  `1d`, `1h30m` or a bare number of minutes, up to 7 days. Running it again
+  while a window is open sets a new end time (counted from now) and, if given,
+  a new reason.
+- While the window is open, nothing goes out for Uptime Kuma (down, recovery,
+  disconnect and stale-data alerts), SiteGuard (site down/recovery, SSL,
+  WordPress unreachable, stale data, reminders, tickets) or the WordPress node
+  agents: no Discord alert, no `@everyone`, no email, no Zammad ticket and no
+  phone call. Escalations already running at the PBX are cleared when the
+  window starts. Every alert held back is logged ("Alert suppressed:
+  maintenance window") and counted. Monitoring keeps running, so the status
+  board stays current; it shows a MAINTENANCE WINDOW banner with the end time.
+- The window ends by itself at its end time (checked every 15 seconds), or
+  early with `/maintenance end` (admin only). Either way the bot posts one
+  summary to the alert channel: when it ended (and by whom), who started it,
+  the reason, how many alerts were suppressed (by kind), and what is still
+  down.
+- Whatever is still down when the window ends alerts normally: each Kuma
+  monitor or SiteGuard site whose outage began during the window gets its
+  usual down alert (with `@everyone`, email and ticket as configured), and
+  phone escalation starts over, with the PBX's normal delay counted from the
+  end of the window. Outages already announced before the window keep their
+  reminders and are not announced twice. If Uptime Kuma is still disconnected,
+  the disconnect alert goes out.
+- `/maintenance status` (anyone who can see the command; private reply) shows
+  whether a window is open, who started it, why, until when, and how many
+  alerts it has held back so far.
+
+Starting a window posts one notice to the alert channel (who, reason, end
+time, no ping) and gives the person who ran the command a private
+confirmation. The window is stored in the `maintenance_window` table of
+`data/bot.db`, so it survives a restart; after a restart a window that has
+already run out is closed (and re-alerting done) once Uptime Kuma has
+reconnected, or after two minutes at most. A window past its end time no
+longer silences anything, even before the sweep closes it.
+
+The window covers what this bot sends. Notifications Uptime Kuma sends by
+itself (its own notification providers) are not affected; use a Kuma
+maintenance for those.
 
 ### Pausing one SiteGuard site
 
