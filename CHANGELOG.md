@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.6] - 2026-10-24
+
+### Security
+- Dependency updates for new advisories that failed the CI audit gate:
+  undici 6.29.1 and zod 4.6.7 (high, denial of service), nodemailer 10.2.1
+  (address parsing), fastify 5.12.7, fast-uri 3.1.9. v1.1.5 was tagged but
+  never built or deployed because of this; 1.1.6 includes its change.
+
 ## [1.1.5] - 2026-10-24
 
 ### Fixed
