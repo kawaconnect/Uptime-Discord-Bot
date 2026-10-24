@@ -160,7 +160,22 @@ function redactUrl(raw: string): string {
   }
 }
 
+/**
+ * Socket events the bot either handles or deliberately ignores. Kuma 2.x also
+ * pushes admin UI lists and a very frequent `domainInfo`; the bot uses none of
+ * them, so they are not "unknown".
+ */
+export const KNOWN_SOCKET_EVENTS: ReadonlySet<string> = new Set([
+  "connect", "disconnect", "connect_error", "autoLogin",
+  "monitorList", "heartbeat", "heartbeatList", "importantHeartbeatList",
+  "avgPing", "uptime", "info", "certInfo",
+  "domainInfo", "maintenanceList", "monitorTypeList", "notificationList",
+  "proxyList", "dockerHostList", "apiKeyList", "remoteBrowserList", "statusPageList",
+]);
+
 class KumaClient extends EventEmitter {
+  /** Unknown socket event names already logged at info level. */
+  private seenUnknownEvents = new Set<string>();
   private socket: Socket | null = null;
   private _monitors = new Map<number, KumaMonitor>();
   private _latestStatus = new Map<number, number>();
@@ -249,15 +264,16 @@ class KumaClient extends EventEmitter {
 
     this.socket = io(url, kumaSocketOptions(config.KUMA_AUTH_HEADER));
 
-    // Log ALL socket events for debugging
+    // Log socket events we don't recognise: once per event name at info,
+    // then at debug, so a new Kuma event shows up without flooding the log.
     this.socket.onAny((event: string, ...args: unknown[]) => {
-      // Skip noisy events we already handle, but log unknown ones
-      const known = ["connect", "disconnect", "connect_error", "autoLogin",
-        "monitorList", "heartbeat", "heartbeatList", "importantHeartbeatList",
-        "avgPing", "uptime", "info", "certInfo"];
-      if (!known.includes(event)) {
-        logger.info({ event, argCount: args.length }, "Unknown socket event received");
+      if (KNOWN_SOCKET_EVENTS.has(event)) return;
+      if (this.seenUnknownEvents.has(event)) {
+        logger.debug({ event, argCount: args.length }, "Unknown socket event received");
+        return;
       }
+      this.seenUnknownEvents.add(event);
+      logger.info({ event, argCount: args.length }, "Unknown socket event received (logged once; further ones at debug)");
     });
 
     this.socket.on("connect", () => {

@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.5] - 2026-10-24
+
+### Fixed
+- Uptime Kuma 2.x pushes `domainInfo` (about 30 a minute) and admin-UI list
+  events the bot doesn't use; each one was logged at info level as "Unknown
+  socket event received". They are now known events. A genuinely new event is
+  logged once at info, then at debug.
+
 ## [1.1.4] - 2026-10-23
 
 ### Added
