@@ -26,6 +26,7 @@ import { escapeHtml } from "../util/html.js";
 import { mentionsFor, NO_MENTIONS } from "../util/mentions.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 import { isPhoneEscalationEnabled, markDown, markUp, reportActive, trackedKeys } from "./phone.js";
+import { planPhoneEscalation } from "./phoneMonitors.js";
 import { suppressedByMaintenance } from "./maintenance.js";
 
 const ALERT_CHANNEL_KEY = "ALERT_CHANNEL_ID";
@@ -56,27 +57,19 @@ export function stopAlerts(): void {
  * monitors in a maintenance window are all skipped - a deliberately silenced
  * location must never ring a phone.
  */
-async function runEscalationSweep(): Promise<void> {
+export async function runEscalationSweep(): Promise<void> {
   if (!isPhoneEscalationEnabled()) return;
   if (!kuma.connected) return; // a dead socket is not evidence that sites are down
 
-  const stillDown = new Set<string>();
-
-  for (const { monitor } of kuma.getDownMonitors()) {
-    if (kuma.isEffectivelyPaused(monitor.id)) continue;
-    if (kuma.latestStatus.get(monitor.id) === MonitorStatus.MAINTENANCE) continue;
-
+  const plan = planPhoneEscalation(
+    kuma.monitors, kuma.latestStatus, trackedKeys(), (id) => kuma.isEffectivelyPaused(id),
+  );
+  for (const monitor of plan.report) {
     const key = `kuma:monitor:${monitor.id}`;
-    stillDown.add(key);
     markDown(key);
     await reportActive(key, `${monitor.name} is down.`, "uptime", "kuma-down");
   }
-
-  for (const key of trackedKeys()) {
-    if (key.startsWith("kuma:monitor:") && !stillDown.has(key)) {
-      await markUp(key);
-    }
-  }
+  for (const key of plan.resolve) await markUp(key);
 }
 
 function isEnabled(type: string): boolean {
@@ -158,13 +151,13 @@ export function startAlerts(client: Client): void {
   kuma.on("statusChange", (monitor: KumaMonitor, heartbeat: KumaHeartbeat, previousStatus: number | undefined) => {
     if (heartbeat.status === MonitorStatus.UP) downAnnounced.delete(monitor.id);
     if (heartbeat.status === MonitorStatus.DOWN && isEnabled("down")) {
-      markDown(`kuma:monitor:${monitor.id}`);
+      if (monitor.type !== "group") markDown(`kuma:monitor:${monitor.id}`);
       if (suppressedByMaintenance("kuma-down", { monitorId: monitor.id, name: monitor.name })) return;
       sendDownAlert(client, monitor, heartbeat).catch((err) =>
         logger.error({ err, monitorId: monitor.id }, "Failed to send down alert")
       );
     } else if (heartbeat.status === MonitorStatus.UP && previousStatus === MonitorStatus.DOWN && isEnabled("recovery")) {
-      markUp(`kuma:monitor:${monitor.id}`).catch(() => undefined);
+      if (monitor.type !== "group") markUp(`kuma:monitor:${monitor.id}`).catch(() => undefined);
       if (suppressedByMaintenance("kuma-recovery", { monitorId: monitor.id, name: monitor.name })) return;
       sendRecoveryAlert(client, monitor, heartbeat).catch((err) =>
         logger.error({ err, monitorId: monitor.id }, "Failed to send recovery alert")

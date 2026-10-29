@@ -100,17 +100,26 @@ export function markDown(key: string): number {
 
 /** Clears a condition and tells the PBX to drop its cooldown bookkeeping. */
 export async function markUp(key: string): Promise<void> {
-  ackHandled.delete(key);
-  if (!activeSince.delete(key)) return;
+  if (!activeSince.has(key)) return;
   const cfg = config();
-  if (!cfg) return;
+  if (!cfg) {
+    activeSince.delete(key);
+    ackHandled.delete(key);
+    return;
+  }
   try {
-    await fetch(`${cfg.url}/resolve`, {
+    const response = await fetch(`${cfg.url}/resolve`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${cfg.token}` },
       body: JSON.stringify({ key }),
       signal: AbortSignal.timeout(10_000),
     });
+    if (!response.ok) {
+      logger.warn({ key, status: response.status }, "PBX did not accept recovery; will retry");
+      return;
+    }
+    activeSince.delete(key);
+    ackHandled.delete(key);
   } catch (err) {
     logger.debug({ err, key }, "Failed to clear PBX alert state");
   }

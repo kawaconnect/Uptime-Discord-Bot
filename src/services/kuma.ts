@@ -415,10 +415,8 @@ class KumaClient extends EventEmitter {
 
     this.socket.on("importantHeartbeatList", (monitorId: string, beats: KumaHeartbeat[]) => {
       this._lastDataAt = Date.now();
-      this._lastHeartbeatListAt = Date.now();
-      if (Array.isArray(beats) && beats.length > 0) {
-        this._latestStatus.set(Number(monitorId), beats[beats.length - 1].status);
-      }
+      // Notification history may predate the current outage. Current state
+      // comes from heartbeat/heartbeatList, never the last important event.
       this.scheduleStatusUpdate();
     });
 

@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.7] - 2026-10-29
+
+### Fixed
+- Preserve phone acknowledgements when Kuma reconnects and its monitor/status
+  snapshot is temporarily empty or pending. Only confirmed UP, maintenance, or
+  an intentional pause clears a tracked leaf incident.
+- Parent groups no longer generate duplicate phone incidents for down children.
+- Historical important-heartbeat lists no longer overwrite current monitor status.
+- Regression coverage replays repeated reconnects against an acknowledged PBX
+  incident and verifies that a real recovery still rearms a new outage.
+
 ## [1.1.6] - 2026-10-24
 
 ### Security
