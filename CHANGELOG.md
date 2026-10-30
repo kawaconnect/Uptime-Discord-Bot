@@ -2,6 +2,18 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.8] - 2026-10-30
+
+### Fixed
+- WordPress node agents are no longer reported unreachable (Discord alert and
+  Zammad ticket) after a single failed poll. A brief network blip on the way
+  to web02 opened 18 tickets since 2026-10-14. An alert now needs 3 failed
+  polls in a row (about 3 minutes, `WPOPS_UNREACHABLE_AFTER`), is sent once
+  per outage, and "reachable again" is sent only after an alert.
+- Read-only agent requests are retried once after a connection failure.
+- Alerts name the underlying network error, e.g. `fetch failed (ECONNRESET)`,
+  instead of a bare "fetch failed".
+
 ## [1.1.7] - 2026-10-29
 
 ### Fixed

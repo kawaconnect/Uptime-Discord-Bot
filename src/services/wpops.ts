@@ -109,6 +109,19 @@ export class WpopsError extends Error {
   constructor(message: string, public status = 0) { super(message); }
 }
 
+/** Consecutive failed polls before a node is reported unreachable (one poll a minute). */
+export const WPOPS_UNREACHABLE_AFTER = Math.max(1, Number(process.env.WPOPS_UNREACHABLE_AFTER) || 3);
+const WPOPS_RETRY_DELAY_MS = Number(process.env.WPOPS_RETRY_DELAY_MS ?? 2_000);
+
+/** "fetch failed" alone says nothing; add the underlying cause (ECONNRESET, ENOTFOUND, ...). */
+export function networkErrorMessage(err: unknown): string {
+  if (!(err instanceof Error)) return String(err);
+  if (err.name === "AbortError") return "timeout";
+  const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+  const detail = cause?.code ?? cause?.message;
+  return detail && !err.message.includes(detail) ? `${err.message} (${detail})` : err.message;
+}
+
 // ------------------------------------------------------------------ nodes
 
 /**
@@ -170,7 +183,19 @@ export function getNode(name: string): WpNode {
 export class WpopsClient {
   constructor(private node: WpNode) {}
 
+  // GETs are retried once after a connection-level failure (a dropped or
+  // reset connection on the way to the agent); POSTs are never repeated.
   private async req<T>(method: "GET" | "POST", path: string, body?: unknown, actor = "bot", timeoutMs = 30_000): Promise<T> {
+    try {
+      return await this.once<T>(method, path, body, actor, timeoutMs);
+    } catch (err) {
+      if (method !== "GET" || !(err instanceof WpopsError) || err.status !== 0) throw err;
+      await new Promise((r) => setTimeout(r, WPOPS_RETRY_DELAY_MS));
+      return this.once<T>(method, path, body, actor, timeoutMs);
+    }
+  }
+
+  private async once<T>(method: "GET" | "POST", path: string, body: unknown, actor: string, timeoutMs: number): Promise<T> {
     const controller = new AbortController();
     const t = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -195,8 +220,7 @@ export class WpopsClient {
       return data as T;
     } catch (err) {
       if (err instanceof WpopsError) throw err;
-      const msg = err instanceof Error ? (err.name === "AbortError" ? "timeout" : err.message) : String(err);
-      throw new WpopsError(`${this.node.name}: ${msg}`);
+      throw new WpopsError(`${this.node.name}: ${networkErrorMessage(err)}`);
     } finally {
       clearTimeout(t);
     }
@@ -251,6 +275,8 @@ class WpopsService extends EventEmitter {
   private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   private jobWatch = new Map<string, { node: string; notified: boolean }>();
+  private failures = new Map<string, number>();
+  private alerted = new Set<string>();
 
   get configured(): boolean { return getNodes().length > 0; }
 
@@ -288,15 +314,22 @@ class WpopsService extends EventEmitter {
           }
           const snap: NodeSnapshot = { node, status, inventory, error: "", updatedAt: Date.now() };
           this.snapshots.set(node.name, snap);
-          if (prev?.error) this.emit("nodeReachable", node.name);
+          this.failures.delete(node.name);
+          if (this.alerted.delete(node.name)) this.emit("nodeReachable", node.name);
           await this.drainEvents(node, c);
           this.watchJobs(node, status);
           this.detectOverrideChanges(prev, snap);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          const wasOk = prev && !prev.error;
           this.snapshots.set(node.name, { node, status: prev?.status ?? null, inventory: prev?.inventory ?? [], error: msg, updatedAt: prev?.updatedAt ?? 0 });
-          if (wasOk || !prev) this.emit("nodeUnreachable", node.name, msg);
+          // A single failed poll is usually a network blip; alert only when it persists.
+          const count = (this.failures.get(node.name) ?? 0) + 1;
+          this.failures.set(node.name, count);
+          logger.warn({ node: node.name, failures: count, err: msg }, "wpops node poll failed");
+          if (count >= WPOPS_UNREACHABLE_AFTER && !this.alerted.has(node.name)) {
+            this.alerted.add(node.name);
+            this.emit("nodeUnreachable", node.name, `${msg} (${count} checks in a row)`);
+          }
         }
       }
       for (const name of [...this.snapshots.keys()]) if (!nodes.find((n) => n.name === name)) this.snapshots.delete(name);
