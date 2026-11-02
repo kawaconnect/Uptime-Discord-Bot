@@ -203,6 +203,7 @@ async function handleSgShowSetup(interaction: ChatInputCommandInteraction) {
     "",
     `**WordPress Endpoint:** ${siteguard.getUrl() ?? "*not configured*"}`,
     `**Connection:** ${siteguard.isConfigured ? (siteguard.reachable ? "\u{1F7E2} Reachable" : "\u{1F534} Unreachable") : "\u26AA Not configured"}`,
+    ...(siteguard.data?.sources ?? []).filter((x) => x.kind === "node").map((x) => `**Node ${x.name}:** ${x.current ? "\u{1F7E2}" : "\u{1F534}"} ${x.sites} site(s) (${x.version})`),
     summary ? `**Sites:** ${summary.operational}/${summary.total} operational` : "",
     siteguard.data ? `**SiteGuard Version:** ${siteguard.data.version}` : "",
     `**Poll Interval:** ${(config.SG_HEALTH_POLL_MS ?? 60000) / 1000}s`,
@@ -346,10 +347,14 @@ async function handleSgRepeat(interaction: ChatInputCommandInteraction) {
 async function handleSgDisconnect(interaction: ChatInputCommandInteraction) {
   deleteSetting("SG_HEALTH_URL");
   deleteSetting("SG_HEALTH_API_KEY");
-  siteguard.stop();
+  // Its sites are no longer probed either; node agents keep reporting theirs.
+  deleteSetting("SG_KNOWN_SITES");
+  siteguard.restart();
 
   await interaction.reply({
-    content: "\u2705 SiteGuard health monitor disconnected. Polling stopped.\n\nTo reconnect, use `/sg-setup connect <url> <api_key>`.",
+    content: "\u2705 SiteGuard endpoint disconnected. Polling of it stopped" +
+      (siteguard.hasNodeSources ? "; sites reported by WordPress node agents are still monitored." : ".") +
+      "\n\nTo reconnect, use `/sg-setup connect <url> <api_key>`.",
     ephemeral: true,
   });
   logger.info("SG health endpoint disconnected via slash command");

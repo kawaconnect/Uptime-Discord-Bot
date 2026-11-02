@@ -334,12 +334,30 @@ Requires at least one wpops node agent (see WPMultisiteDocker
 | Command | Permission | Purpose |
 |---|---|---|
 | `/wp panel` | view | Control panel with buttons: failover down/all/one site, rollback, backups, pull now, apply backup, jobs |
-| `/wp status`, `/wp sites [live]`, `/wp jobs [id]` | view | Nodes, overrides, tunnels, backups; inventory and live DNS; job logs |
+| `/wp status`, `/wp sites [live] [node]`, `/wp jobs [id]` | view | Nodes, overrides, tunnels, backups; every site per node (health, WordPress/PHP, last backup, disk) and the inventory; live DNS; job logs |
 | `/wp failover down\|all\|site\|rollback` | failover | Plan is shown first; a confirm button applies it |
 | `/wp backup now\|list\|schedule\|keep` | backup (list: view) | Pull from the primary; weekly schedule and retention |
 | `/wp restore <set> [sites] [stack]` | restore | Apply a pulled set (never automatic) |
 | `/wp perms grant\|revoke\|list` | admin | Delegate to users or roles |
 | `/wp node add\|remove\|list`, `/wp setup channel\|email` | admin | Agents and notification settings |
+
+#### Sites on WordPress nodes
+
+A node registers once, with its agent token (`/wp node add`). Agents from
+WPMultisiteDocker 0.0.7 report every WordPress deployment on the node, each
+single-site stack and each multisite blog, through `GET /v1/siteguard/health`.
+The bot monitors every one of them like a SiteGuard site: down/recovery and SSL
+alerts, reminders, tickets, `/sg-monitors`, pauses and the status board (one
+line per node: `N/M sites up`). Sites added to or removed from a node appear
+and disappear by themselves, with one short notice in the WordPress ops
+channel. Health comes from each stack's own SiteGuard (the node holds a key
+for it) or from the node's direct check; the bot's own direct probe covers the
+legacy endpoint's sites only, unless `SG_DIRECT_PROBE_NODES=true`.
+
+The single SiteGuard endpoint (`/sg-setup connect`) still works, alone or next
+to nodes; node sites get ids from 100000 up so they never collide with its blog
+ids. `/sg-setup disconnect` stops only that endpoint. Older agents (no
+registry) keep working for failover, backups and restores as before.
 
 ## HTTP endpoints
 

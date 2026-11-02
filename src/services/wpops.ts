@@ -11,12 +11,20 @@
  * latest backups) and tails its event log; new events are emitted so the
  * alert pipeline can post to Discord and e-mail (backup pulled, backup
  * failed, restore applied, failover applied / rolled back).
+ *
+ * It also reads every node's site registry in SiteGuard's format
+ * (GET /v1/siteguard/health, agents from WPMultisiteDocker 0.0.7) and hands
+ * it to the SiteGuard monitor through nodeSites: each single-site stack and
+ * multisite blog on the node becomes a monitored site, added and removed as
+ * the node reports them ("sitesChanged"). Older agents answer 404 and keep
+ * working as before.
  */
 
 import { EventEmitter } from "node:events";
 import { logger } from "../util/logger.js";
 import { getSetting, setSetting } from "../db/index.js";
 import { siteguard } from "./siteguard.js";
+import { nodeSites, type NodeSgPayload, type NodeSgSite } from "./nodeSites.js";
 
 export interface WpNode {
   name: string;
@@ -64,6 +72,41 @@ export interface WpNodeStatus {
   };
   jobs: { active: WpJob[]; recent: WpJob[] };
   sites: number;
+  /** Agents with the site registry (WPMultisiteDocker 0.0.7+). */
+  registry?: { revision: number; sites: number; status: Record<string, number>; health_updated: number | null };
+}
+
+/** One site of a node's registry (GET /v1/registry). */
+export interface WpRegistrySite {
+  uid: string;
+  id: string;
+  site_id: number;
+  node: string;
+  stack: string;
+  mode: string;
+  blog_id: number;
+  slug: string | null;
+  name: string;
+  url: string;
+  host: string;
+  domains: string[];
+  primary: string;
+  mapped: boolean;
+  managed: boolean;
+  health: { status?: string; source?: string; error?: string; http_code?: number; response_time?: number; ssl_expiry_days?: number; since?: number };
+  versions: { wordpress?: string | null; php?: string | null; siteguard?: string | null };
+  backup: { siteguard_last?: number; siteguard_sets?: number; pulled?: { set: string; pulled_at: number }; restored?: { set: string; at: number } };
+  disk: { stack_bytes?: number | null; uploads_bytes?: number | null; filesystem?: { free: number; total: number; low: boolean } | null };
+  tunnel: { account: string | null; tunnel: string | null; ready: boolean };
+  overrides: Record<string, string>;
+}
+
+export interface WpRegistry {
+  node: string;
+  agent_version: string;
+  revision: number;
+  stacks: { name: string; mode: string; managed: boolean; versions: WpRegistrySite["versions"]; siteguard: { key: string | null; status: string; error: string }; sites: string[] }[];
+  sites: WpRegistrySite[];
 }
 
 export interface WpJob {
@@ -249,6 +292,10 @@ export class WpopsClient {
   job(id: string) { return this.req<WpJob>("GET", `/v1/jobs/${encodeURIComponent(id)}`); }
   jobLog(id: string, lines = 40) { return this.req<{ log: string }>("GET", `/v1/jobs/${encodeURIComponent(id)}/log?lines=${lines}`); }
   events(since: number) { return this.req<{ events: WpEvent[] }>("GET", `/v1/events?since=${since}&limit=100`); }
+  eventsAfter(seq: number, limit = 100) { return this.req<{ events: WpEvent[] }>("GET", `/v1/events?after=${seq}&limit=${limit}`); }
+  siteguardHealth() { return this.req<NodeSgPayload>("GET", "/v1/siteguard/health", undefined, "bot", 60_000); }
+  registry() { return this.req<WpRegistry>("GET", "/v1/registry", undefined, "bot", 60_000); }
+  registryChanges(since: number) { return this.req<{ revision: number; reset: boolean; changes: { rev: number; op: string; uid: string; site: WpRegistrySite }[] }>("GET", `/v1/registry/changes?since=${since}`); }
   notifyTest(actor: string) { return this.req<unknown>("POST", "/v1/notify/test", {}, actor); }
 }
 
@@ -268,7 +315,13 @@ export interface NodeSnapshot {
   inventory: WpSite[];
   error: string;
   updatedAt: number;
+  /** The agent serves the site registry (false: older agent, 404). */
+  registry?: boolean;
 }
+
+/** Re-ask an agent that had no registry (it may have been upgraded) this often. */
+const REGISTRY_RECHECK_MS = 30 * 60_000;
+const EVENT_SEQ_KEY = "WPOPS_EVENT_SEQ";
 
 class WpopsService extends EventEmitter {
   snapshots = new Map<string, NodeSnapshot>();
@@ -277,6 +330,7 @@ class WpopsService extends EventEmitter {
   private jobWatch = new Map<string, { node: string; notified: boolean }>();
   private failures = new Map<string, number>();
   private alerted = new Set<string>();
+  private noRegistry = new Map<string, number>();
 
   get configured(): boolean { return getNodes().length > 0; }
 
@@ -312,8 +366,9 @@ class WpopsService extends EventEmitter {
           if (!prev || !prev.inventory.length || Date.now() - prev.updatedAt > 10 * 60_000) {
             inventory = (await c.inventory()).sites;
           }
-          const snap: NodeSnapshot = { node, status, inventory, error: "", updatedAt: Date.now() };
+          const snap: NodeSnapshot = { node, status, inventory, error: "", updatedAt: Date.now(), registry: prev?.registry };
           this.snapshots.set(node.name, snap);
+          await this.pollSites(node, c, snap);
           this.failures.delete(node.name);
           if (this.alerted.delete(node.name)) this.emit("nodeReachable", node.name);
           await this.drainEvents(node, c);
@@ -321,7 +376,8 @@ class WpopsService extends EventEmitter {
           this.detectOverrideChanges(prev, snap);
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
-          this.snapshots.set(node.name, { node, status: prev?.status ?? null, inventory: prev?.inventory ?? [], error: msg, updatedAt: prev?.updatedAt ?? 0 });
+          nodeSites.failed(node.name);
+          this.snapshots.set(node.name, { node, status: prev?.status ?? null, inventory: prev?.inventory ?? [], error: msg, updatedAt: prev?.updatedAt ?? 0, registry: prev?.registry });
           // A single failed poll is usually a network blip; alert only when it persists.
           const count = (this.failures.get(node.name) ?? 0) + 1;
           this.failures.set(node.name, count);
@@ -333,24 +389,94 @@ class WpopsService extends EventEmitter {
         }
       }
       for (const name of [...this.snapshots.keys()]) if (!nodes.find((n) => n.name === name)) this.snapshots.delete(name);
+      nodeSites.retain(nodes.map((n) => n.name));
       this.emit("updated");
     } finally {
       this.polling = false;
     }
   }
 
+  /**
+   * The node's sites in SiteGuard's format, for the SiteGuard monitor. A 404
+   * means an agent without the registry: nothing changes for that node.
+   */
+  private async pollSites(node: WpNode, c: WpopsClient, snap: NodeSnapshot): Promise<void> {
+    const skippedAt = this.noRegistry.get(node.name);
+    if (skippedAt && Date.now() - skippedAt < REGISTRY_RECHECK_MS) return;
+    let payload: NodeSgPayload;
+    try {
+      payload = await c.siteguardHealth();
+    } catch (err) {
+      if (err instanceof WpopsError && err.status === 404) {
+        this.noRegistry.set(node.name, Date.now());
+        snap.registry = false;
+        nodeSites.remove(node.name);
+        return;
+      }
+      nodeSites.failed(node.name);
+      logger.warn({ node: node.name, err: err instanceof Error ? err.message : String(err) }, "wpops: site registry not read");
+      return;
+    }
+    if (!payload || !Array.isArray(payload.sites)) {
+      nodeSites.failed(node.name);
+      return;
+    }
+    this.noRegistry.delete(node.name);
+    snap.registry = true;
+    const before = nodeSites.get(node.name)?.payload.sites ?? null;
+    nodeSites.set(node.name, payload);
+    if (before) {
+      const had = new Map(before.map((s) => [s.uid, s]));
+      const has = new Map(payload.sites.map((s) => [s.uid, s]));
+      const added = payload.sites.filter((s) => !had.has(s.uid));
+      const removed = before.filter((s) => !has.has(s.uid));
+      if (added.length || removed.length) {
+        logger.info({ node: node.name, added: added.map((s) => s.uid), removed: removed.map((s) => s.uid) }, "wpops: node sites changed");
+        this.emit("sitesChanged", node.name, added, removed);
+      }
+    }
+  }
+
+  /** Sites a node reports (registry), or [] for an older agent. */
+  nodeSites(nodeName: string): NodeSgSite[] {
+    return nodeSites.get(nodeName)?.payload.sites ?? [];
+  }
+
   private async drainEvents(node: WpNode, c: WpopsClient): Promise<void> {
+    const seqKey = `${EVENT_SEQ_KEY}_${node.name}`;
+    const seqRaw = getSetting(seqKey);
+    if (seqRaw !== undefined && seqRaw !== null) {
+      // Agents with numbered events: page forward by sequence, nothing is
+      // skipped when several events share a second.
+      let cursor = Number(seqRaw) || 0;
+      for (let page = 0; page < 10; page++) {
+        const { events } = await c.eventsAfter(cursor, 100);
+        for (const ev of events) {
+          const seq = Number(ev.seq ?? 0);
+          if (seq <= cursor) continue;
+          cursor = seq;
+          this.emit("event", node.name, ev);
+        }
+        if (events.length < 100) break;
+      }
+      if (String(cursor) !== seqRaw) setSetting(seqKey, String(cursor));
+      return;
+    }
     const key = `${EVENT_CURSOR_KEY}_${node.name}`;
     const since = Number(getSetting(key) ?? 0) || 0;
     const { events } = await c.events(since);
     let cursor = since;
+    let lastSeq = 0;
     for (const ev of events) {
+      lastSeq = Math.max(lastSeq, Number(ev.seq ?? 0));
       if (ev.ts <= since) continue;
       cursor = Math.max(cursor, ev.ts);
       if (since === 0) continue;               // first run: do not replay history
       this.emit("event", node.name, ev);
     }
     if (cursor !== since) setSetting(key, String(cursor));
+    // The agent numbers its events: switch to the sequence cursor from here on.
+    if (lastSeq > 0) setSetting(seqKey, String(lastSeq));
   }
 
   private watchJobs(node: WpNode, status: WpNodeStatus): void {
@@ -419,7 +545,7 @@ class WpopsService extends EventEmitter {
     for (const s of sgSites) {
       const down = s.status === "down" || directDown.has(s.site_id);
       if (!down) continue;
-      const site = this.siteForDomain(s.domain);
+      const site = (s.slug ? this.sites().get(s.slug) : undefined) ?? this.siteForDomain(s.domain);
       if (site && !out.has(site.slug)) out.set(site.slug, s.error || `HTTP ${s.http_code}`);
     }
     return [...out.entries()].map(([slug, reason]) => ({ slug, reason }));

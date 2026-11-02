@@ -28,7 +28,8 @@ import { randomBytes } from "node:crypto";
 import { logger } from "../util/logger.js";
 import { getSetting, setSetting } from "../db/index.js";
 import { CAPABILITIES, can, capabilitiesOf, grant, isAdminUser, listGrants, memberRoleIds, revoke, type Capability } from "../services/permissions.js";
-import { getNode, getNodes, saveNodes, wpops, WpopsClient, WpopsError, fmtAgo, fmtBytes, type Selection, type WpPlan, assertAgentUrl } from "../services/wpops.js";
+import { getNode, getNodes, saveNodes, wpops, WpopsClient, WpopsError, fmtAgo, fmtBytes, type Selection, type WpPlan, type WpRegistry, assertAgentUrl } from "../services/wpops.js";
+import { nodeSites } from "../services/nodeSites.js";
 
 const EPH = { flags: MessageFlags.Ephemeral } as const;
 const COLOR = { ok: 0x2ecc71, warn: 0xf39c12, bad: 0xe74c3c, info: 0x3498db, red: 0xc0392b } as const;
@@ -78,7 +79,7 @@ export const wpCommand = new SlashCommandBuilder()
   .setDescription("WordPress operations: failover, backups, restores")
   .addSubcommand((s) => s.setName("panel").setDescription("Post the WordPress control panel (buttons) in this channel"))
   .addSubcommand((s) => s.setName("status").setDescription("Nodes, active failovers, tunnels, latest backups"))
-  .addSubcommand((s) => s.setName("sites").setDescription("Sites in the inventory and where they point").addBooleanOption((o) => o.setName("live").setDescription("Query Cloudflare DNS now")))
+  .addSubcommand((s) => s.setName("sites").setDescription("Every site per node (health, versions, backups) and where they point").addBooleanOption((o) => o.setName("live").setDescription("Query Cloudflare DNS now")).addStringOption((o) => o.setName("node").setDescription("Only this node")))
   .addSubcommandGroup((g) => g.setName("failover").setDescription("Move sites to the backup node, or back")
     .addSubcommand((s) => s.setName("down").setDescription("Switch every site that is currently DOWN to the backup").addStringOption((o) => o.setName("to").setDescription("Target node")))
     .addSubcommand((s) => s.setName("all").setDescription("Switch ALL sites to the backup").addStringOption((o) => o.setName("to").setDescription("Target node")))
@@ -202,9 +203,54 @@ async function cmdSites(i: ChatInputCommandInteraction): Promise<void> {
     await i.editReply({ embeds: [new EmbedBuilder().setTitle("Sites - live DNS").setDescription(lines.join("\n").slice(0, 4000)).setColor(COLOR.info)] });
     return;
   }
-  const sites = [...wpops.sites().values()];
-  const lines = sites.map((s) => `${wpops.isSiteInFailover(s.slug) ? "🔴" : "🟢"} **${s.name}** (\`${s.slug}\`) primary **${s.primary}** - ${s.domains.join(", ")}`);
-  await i.editReply({ embeds: [new EmbedBuilder().setTitle(`Sites (${sites.length})`).setDescription(lines.join("\n").slice(0, 4000) || "inventory not loaded yet").setColor(COLOR.info)] });
+  // Nodes with the site registry: every site they host, with health and versions.
+  const only = i.options.getString("node");
+  const embeds: EmbedBuilder[] = [];
+  const registryNodes = getNodes().filter((n) => (!only || n.name === only) && wpops.snapshots.get(n.name)?.registry);
+  for (const n of registryNodes.slice(0, 8)) {
+    let reg: WpRegistry;
+    try {
+      reg = await client(n.name).registry();
+    } catch (err) {
+      embeds.push(new EmbedBuilder().setTitle(`${n.name}: registry unavailable`).setDescription(err instanceof Error ? err.message : String(err)).setColor(COLOR.warn));
+      continue;
+    }
+    embeds.push(registryEmbed(reg));
+  }
+  // Inventory sites (legacy agents, and sites hosted elsewhere).
+  const hosted = new Set(registryNodes.flatMap((n) => nodeSites.get(n.name)?.payload.sites.map((s) => s.slug).filter(Boolean) ?? []));
+  const sites = [...wpops.sites().values()].filter((s) => !hosted.has(s.slug));
+  if (sites.length || !embeds.length) {
+    const lines = sites.map((s) => `${wpops.isSiteInFailover(s.slug) ? "🔴" : "🟢"} **${s.name}** (\`${s.slug}\`) primary **${s.primary}** - ${s.domains.join(", ")}`);
+    embeds.push(new EmbedBuilder().setTitle(`Inventory sites${registryNodes.length ? " not hosted on these nodes" : ""} (${sites.length})`).setDescription(lines.join("\n").slice(0, 4000) || "inventory not loaded yet").setColor(COLOR.info));
+  }
+  await i.editReply({ embeds: embeds.slice(0, 10) });
+}
+
+const HEALTH_EMOJI: Record<string, string> = { operational: "🟢", degraded: "🟡", down: "🔴" };
+
+function registryEmbed(reg: WpRegistry): EmbedBuilder {
+  const up = reg.sites.filter((s) => s.health.status === "operational").length;
+  const lines = reg.sites.map((s) => {
+    const h = s.health;
+    const parts = [
+      `${HEALTH_EMOJI[h.status ?? ""] ?? "⚪"} **${s.slug ?? s.name ?? s.host}**${s.slug ? "" : " *(unmapped)*"} - ${s.url || s.host}`,
+      `${s.stack}${s.mode === "multisite" ? `#${s.blog_id}` : ""}`,
+      s.versions.wordpress ? `WP ${s.versions.wordpress}${s.versions.php ? `/PHP ${s.versions.php}` : ""}` : "",
+      s.backup.siteguard_last ? `backup ${fmtAgo(s.backup.siteguard_last)}` : "no backup",
+      s.disk.stack_bytes ? fmtBytes(s.disk.uploads_bytes ?? s.disk.stack_bytes) : "",
+      Object.keys(s.overrides).length ? "🔴 failover" : "",
+      h.status !== "operational" && h.error ? `⚠ ${h.error}` : "",
+    ].filter(Boolean);
+    return parts.join(" · ");
+  });
+  const lowSg = reg.stacks.filter((st) => st.siteguard.status && !["ok", "no-key"].includes(st.siteguard.status));
+  if (lowSg.length) lines.push("", ...lowSg.map((st) => `SiteGuard on ${st.name}: ${st.siteguard.status}${st.siteguard.error ? ` (${st.siteguard.error})` : ""}`));
+  return new EmbedBuilder()
+    .setTitle(`${reg.node}: ${up}/${reg.sites.length} sites up (${reg.stacks.length} stack${reg.stacks.length === 1 ? "" : "s"})`)
+    .setDescription(lines.join("\n").slice(0, 4000) || "no sites")
+    .setFooter({ text: `agent ${reg.agent_version} · registry revision ${reg.revision}` })
+    .setColor(up === reg.sites.length ? COLOR.ok : COLOR.warn);
 }
 
 // ---------------------------------------------------------------- failover
@@ -407,6 +453,7 @@ async function cmdNode(i: ChatInputCommandInteraction, sub: string): Promise<voi
     const name = i.options.getString("name", true);
     saveNodes(getNodes().filter((n) => n.name !== name));
     wpops.snapshots.delete(name);
+    nodeSites.remove(name);
     await i.reply({ content: `Removed node ${name}.`, ...EPH });
     return;
   }
@@ -422,7 +469,9 @@ async function cmdNode(i: ChatInputCommandInteraction, sub: string): Promise<voi
   nodes.push({ name, url, token });
   saveNodes(nodes);
   await wpops.poll();
-  await i.editReply(`Node **${name}** saved (agent ${h.version}, ${Object.keys(st.stacks).length} stack(s), ${st.sites} sites in inventory).`);
+  const reported = wpops.snapshots.get(name)?.registry ? nodeSites.get(name)?.payload.sites.length ?? 0 : null;
+  await i.editReply(`Node **${name}** saved (agent ${h.version}, ${Object.keys(st.stacks).length} stack(s), ${st.sites} sites in inventory).` +
+    (reported !== null ? ` ${reported} site(s) on the node are now monitored and follow the node as sites are added or removed.` : ""));
 }
 
 async function cmdSetup(i: ChatInputCommandInteraction, sub: string): Promise<void> {

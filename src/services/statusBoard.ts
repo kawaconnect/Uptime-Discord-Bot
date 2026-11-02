@@ -285,8 +285,13 @@ function buildStatusEmbed(): EmbedBuilder {
     // are named inline; /sg-monitors still lists everything.
     const directDown = new Set(siteguard.getDirectDownSites().map((s) => s.site_id));
     const problem = [...siteguard.data!.sites].filter((s) => s.status !== "operational" || directDown.has(s.site_id) || (s.ssl_expiry_days >= 0 && s.ssl_expiry_days <= 14));
-    const primaryHost = (() => { try { return new URL(siteguard.data!.site_url).host; } catch { return "primary"; } })();
-    description += `\n${sgStatusEmoji(sgSummary.down > 0 ? SgStatus.DOWN : sgSummary.degraded > 0 ? SgStatus.DEGRADED : SgStatus.OPERATIONAL)} **WordPress (${primaryHost})** - ${sgSummary.operational}/${sgSummary.total} sites up`;
+    // One line for the legacy SiteGuard endpoint (if any), one per node below.
+    const legacySites = siteguard.sitesOf(null);
+    if (legacySites.length > 0) {
+      const primaryHost = (() => { try { return new URL(siteguard.data!.site_url).host; } catch { return "primary"; } })();
+      const c = countSites(legacySites, directDown);
+      description += `\n${sgStatusEmoji(c.down > 0 ? SgStatus.DOWN : c.degraded > 0 ? SgStatus.DEGRADED : SgStatus.OPERATIONAL)} **WordPress (${primaryHost})** - ${c.up}/${c.total} sites up`;
+    }
     if (problem.length > 0) {
       const sorted = problem.sort((a, b) => sgSiteLabel(a).localeCompare(sgSiteLabel(b)));
       for (const site of sorted) sgLines.push(formatSiteLine(site, sgDataStale));
@@ -305,7 +310,12 @@ function buildStatusEmbed(): EmbedBuilder {
       const lowDisk = (st.disk ?? []).filter((d) => d.low);
       const flag = stacksOk && !lowDisk.length ? sgStatusEmoji(SgStatus.OPERATIONAL) : stacksOk ? sgStatusEmoji(SgStatus.DEGRADED) : sgStatusEmoji(SgStatus.DOWN);
       const diskNote = lowDisk.length ? `, \u26A0\uFE0F LOW DISK ${lowDisk.map((d) => `${d.label} ${Math.round(d.free / 2 ** 30)} GB free`).join(", ")}` : "";
-      description += `\n${flag} **${snap.node.name} (backup node)** - stack ${stacksOk ? "healthy" : "PROBLEM"}, tunnels ${tReady}/${st.tunnels.length}, last backup ${fmtAgo(latest)}${diskNote}${st.override_count ? `, \u{1F534} serving ${st.override_count} domain(s)` : ""}`;
+      const nodeSites = siteguard.sitesOf(snap.node.name);
+      const nc = countSites(nodeSites, directDown);
+      const sitesNote = snap.registry && nodeSites.length ? `${nc.up}/${nc.total} sites up, ` : "";
+      const nodeFlag = nc.down > 0 && stacksOk ? sgStatusEmoji(SgStatus.DEGRADED) : flag;
+      const stackWord = Object.keys(st.stacks).length > 1 ? "stacks" : "stack";
+      description += `\n${nodeFlag} **${snap.node.name} (${snap.registry ? "node" : "backup node"})** - ${sitesNote}${stackWord} ${stacksOk ? "healthy" : "PROBLEM"}, tunnels ${tReady}/${st.tunnels.length}, last backup ${fmtAgo(latest)}${diskNote}${st.override_count ? `, \u{1F534} serving ${st.override_count} domain(s)` : ""}`;
     }
   }
 
@@ -380,6 +390,18 @@ function buildStatusEmbed(): EmbedBuilder {
     .setDescription(description)
     .setColor(color)
     .setFooter({ text: footerParts.join(" | ") });
+}
+
+function countSites(sites: SgSite[], directDown: Set<number>): { up: number; down: number; degraded: number; total: number } {
+  let up = 0, down = 0, degraded = 0;
+  // "up" as SiteGuard reports it (as the summary always counted); the bot's own
+  // direct probe only colours the line.
+  for (const s of sites) {
+    if (s.status === "operational") up++;
+    if (s.status === "down" || directDown.has(s.site_id)) down++;
+    else if (s.status === "degraded") degraded++;
+  }
+  return { up, down, degraded, total: sites.length };
 }
 
 function formatMonitorLine(monitor: KumaMonitor, latestStatus: Map<number, number>): string {

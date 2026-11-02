@@ -150,8 +150,10 @@ async function main() {
     logger.info({ url: siteguard.getUrl() }, "Starting SiteGuard health monitor");
     siteguard.start();
   } else {
-    logger.warn("SiteGuard health monitor not configured - use /sg-setup connect <url> <api_key>");
+    logger.warn("SiteGuard endpoint not configured - node agents (/wp node add) still report their sites; /sg-setup connect <url> <api_key> for a single WordPress");
   }
+  // Sites reported by node agents start the monitor by themselves (node-only estates).
+  siteguard.enableNodeAutostart();
 
   // WordPress node agents (failover / backups). Nodes come from the DB
   // (/wp node add) or WPOPS_NODES + WPOPS_TOKEN_<NAME> in the environment.

@@ -1,7 +1,15 @@
 /**
  * SiteGuard Health Monitor - HTTP polling client.
  *
- * Polls the WordPress REST API endpoint for multisite health data.
+ * Two kinds of source, merged into one site list:
+ *  - the legacy endpoint (SG_HEALTH_URL + SG_HEALTH_API_KEY): one WordPress
+ *    install, usually a multisite, polled here;
+ *  - WordPress node agents (/wp node add): every site on the node, one per
+ *    stack or multisite blog, reported by the agent's GET /v1/siteguard/health
+ *    and delivered through nodeSites by the wpops poller. Their sites get
+ *    stable ids from NODE_SITE_ID_BASE up (SG_NODE_SITE_IDS), so they never
+ *    collide with a multisite's blog ids, and appear and disappear as the node
+ *    reports them.
  * Emits events on status changes for the alert and status board services.
  * Completely independent from the Uptime Kuma integration.
  */
@@ -10,6 +18,10 @@ import { EventEmitter } from "node:events";
 import { env } from "../util/env.js";
 import { logger } from "../util/logger.js";
 import { getSetting, setSetting } from "../db/index.js";
+import { nodeSites, type NodeSgEntry } from "./nodeSites.js";
+
+/** Ids of node-reported sites start here (a multisite's blog ids stay below). */
+export const NODE_SITE_ID_BASE = 100_000;
 
 // ---------------------------------------------------------------
 // Types
@@ -39,6 +51,20 @@ export interface SgSite {
   ssl_checked_at?: number;
   /** SiteGuard 1.5.4+: certificate expiry (epoch seconds or ISO date). */
   ssl_expires_at?: number | string | null;
+  // Node-reported sites only (absent = the legacy endpoint).
+  source?: "node";
+  node?: string;
+  /** <node>:<stack>:<blog id>, stable on the node. */
+  uid?: string;
+  stack?: string;
+  blog_id?: number;
+  slug?: string | null;
+  name?: string;
+  mode?: string;
+  /** "siteguard" (the stack's own SiteGuard) or "direct" (the agent's HTTP check). */
+  check_source?: string;
+  versions?: { wordpress?: string | null; php?: string | null; siteguard?: string | null };
+  last_backup?: number;
 }
 
 /** One entry of SiteGuard's own alerts[] list (api_version 2). */
@@ -62,6 +88,27 @@ export interface SgHealthResponse {
   version: string;
   api_version?: number;
   alerts?: SgApiAlert[];
+  /** Present when node agents contribute: what each source holds. */
+  sources?: SgSourceInfo[];
+}
+
+export interface SgSourceInfo {
+  kind: "legacy" | "node";
+  name: string;
+  sites: number;
+  version: string;
+  checked_at: number;
+  /** Node: its last poll succeeded. Legacy: the endpoint is reachable. */
+  current: boolean;
+}
+
+/** Where a site's data comes from, for messages. */
+export function sgSiteSource(site: Pick<SgSite, "source" | "node" | "check_source" | "check_method" | "stack">): string {
+  if (site.check_method === "bot-direct") return "bot direct probe";
+  if (site.source === "node") {
+    return `node ${site.node ?? "?"}${site.stack ? ` (stack ${site.stack})` : ""}, ${site.check_source === "siteguard" ? "SiteGuard" : "agent direct check"}`;
+  }
+  return "SiteGuard (WordPress)";
 }
 
 // ---------------------------------------------------------------
@@ -231,6 +278,20 @@ class SiteGuardClient extends EventEmitter {
   private _probing = false;
   /** Known sites (persisted) so direct probes work even while SiteGuard is unreachable. */
   private _knownSites: Array<{ site_id: number; url: string; domain: string }> = [];
+  /** Last good payload of the legacy endpoint (merged with node sites). */
+  private _legacyData: SgHealthResponse | null = null;
+  private _started = false;
+  /** Start by itself once a node reports sites (node-only estates, no legacy endpoint). */
+  private _autoStart = false;
+  private _nodeIds: Record<string, number> | null = null;
+
+  constructor() {
+    super();
+    nodeSites.on("updated", () => {
+      if (this._started) this.applyMerged();
+      else if (this._autoStart && nodeSites.size > 0) this.start();
+    });
+  }
 
   get data(): SgHealthResponse | null { return this._data; }
   get reachable(): boolean { return this._reachable; }
@@ -240,12 +301,26 @@ class SiteGuardClient extends EventEmitter {
   /** Classification of the last poll failure ("" when reachable). */
   get lastErrorKind(): SgErrorKind | "" { return this._lastErrorKind; }
   get sites(): SgSite[] { return this._data?.sites ?? []; }
-  /** Sites seen in earlier polls (persisted), for when no fresh data is in. */
+  /** Sites seen in earlier polls (persisted), plus the sites nodes report now. */
   get knownSites(): Array<{ site_id: number; url: string; domain: string }> {
     if (this._knownSites.length === 0) this.loadKnownSites();
-    return this._knownSites;
+    const nodeRows = this.sites.filter((s) => s.source === "node").map((s) => ({ site_id: s.site_id, url: s.url, domain: s.domain }));
+    return nodeRows.length ? [...this._knownSites, ...nodeRows] : this._knownSites;
   }
+  /** The legacy endpoint (SG_HEALTH_URL) is set. Node agents are separate: see hasNodeSources. */
   get isConfigured(): boolean { return !!this.getUrl(); }
+  /** At least one node agent reports its sites. */
+  get hasNodeSources(): boolean { return nodeSites.size > 0; }
+  get started(): boolean { return this._started; }
+  /** Sites of one node (or of the legacy endpoint with node = null). */
+  sitesOf(node: string | null): SgSite[] {
+    return this.sites.filter((s) => (node === null ? s.source !== "node" : s.source === "node" && s.node === node));
+  }
+  /** Start on the first node report even without a legacy endpoint. */
+  enableNodeAutostart(): void {
+    this._autoStart = true;
+    if (!this._started && nodeSites.size > 0) this.start();
+  }
   get dataStale(): boolean {
     if (!this._data) return false;
     return (Date.now() / 1000 - (this._data.checked_at || 0)) > SG_STALE_THRESHOLD_SEC;
@@ -262,9 +337,11 @@ class SiteGuardClient extends EventEmitter {
   }
 
   start(): void {
+    if (this._started) return;
+    this._started = true;
     const pollMs = env().SG_HEALTH_POLL_MS ?? 60_000;
     const url = this.getUrl();
-    logger.info({ url, pollMs }, "SiteGuard health monitor starting");
+    logger.info({ url, pollMs, nodes: nodeSites.size }, "SiteGuard health monitor starting");
 
     // Immediate first poll
     this.poll().catch((err) => logger.error({ err }, "SiteGuard initial poll failed"));
@@ -288,6 +365,7 @@ class SiteGuardClient extends EventEmitter {
   }
 
   stop(): void {
+    this._started = false;
     if (this._pollTimer) {
       clearInterval(this._pollTimer);
       this._pollTimer = null;
@@ -302,6 +380,13 @@ class SiteGuardClient extends EventEmitter {
   private directProbeEnabled(): boolean {
     const v = getSetting("SG_DIRECT_PROBE") ?? env().SG_DIRECT_PROBE ?? "true";
     return String(v).toLowerCase() !== "false";
+  }
+
+  /** Also probe node-reported sites from here (default off: the node checks them itself, and
+   * a node can host sites whose hostnames are not public). */
+  private directProbeNodes(): boolean {
+    const v = getSetting("SG_DIRECT_PROBE_NODES") ?? process.env.SG_DIRECT_PROBE_NODES ?? "false";
+    return String(v).toLowerCase() === "true";
   }
 
   private directProbeThreshold(): number {
@@ -341,11 +426,14 @@ class SiteGuardClient extends EventEmitter {
    * maintenance 503? no, 503 is down - counts as up: the server is serving.
    */
   async directProbeAll(): Promise<void> {
-    if (this._probing || this._knownSites.length === 0) return;
+    const nodeRows = this.directProbeNodes()
+      ? this.sites.filter((s) => s.source === "node").map((s) => ({ site_id: s.site_id, url: s.url, domain: s.domain }))
+      : [];
+    if (this._probing || this._knownSites.length + nodeRows.length === 0) return;
     this._probing = true;
     const threshold = this.directProbeThreshold();
     try {
-      const queue = [...this._knownSites];
+      const queue = [...this._knownSites, ...nodeRows];
       const workers = Array.from({ length: Math.min(5, queue.length) }, async () => {
         while (queue.length) {
           const site = queue.shift()!;
@@ -432,6 +520,8 @@ class SiteGuardClient extends EventEmitter {
   restart(): void {
     this.stop();
     this._data = null;
+    this._legacyData = null;
+    this._knownSites = [];
     this._previousStatuses.clear();
     this._statusesLoaded = false;
     this._sslAlerted.clear();
@@ -444,7 +534,7 @@ class SiteGuardClient extends EventEmitter {
     this._staleAlerted = false;
     this._directDown.clear();
     this._directFailures.clear();
-    if (this.isConfigured) {
+    if (this.isConfigured || nodeSites.size > 0) {
       this.start();
     }
   }
@@ -519,7 +609,11 @@ class SiteGuardClient extends EventEmitter {
     const url = this.getUrl();
     const apiKey = this.getApiKey();
 
-    if (!url) return;
+    if (!url) {
+      // Node agents only: their data arrives through nodeSites.
+      this.applyMerged();
+      return;
+    }
 
     let data: SgHealthResponse;
     try {
@@ -548,9 +642,13 @@ class SiteGuardClient extends EventEmitter {
       }
     } catch (err) {
       this.handlePollError(err);
+      // Node sites keep updating while the legacy endpoint is down.
+      if (nodeSites.size > 0) this.applyMerged();
       return;
     }
-    this._data = data;
+    this._legacyData = data;
+    const merged = this.buildMerged();
+    if (merged) this._data = merged;
 
     // Reachability state change
     if (!this._reachable) {
@@ -576,9 +674,45 @@ class SiteGuardClient extends EventEmitter {
         logger.warn({ err }, "SiteGuard force check failed")
       );
     }
-    // Stale-data alerting: the endpoint answers but WordPress has not actually
-    // checked its sites for a long time (cron dead). Sites could be down with
-    // nobody noticing, so this is alert-worthy - once, plus a recovery notice.
+    if (merged) this.applyMergedData(merged);
+
+    logger.debug(
+      { status: data.status, siteCount: data.sites.length, checkedAt: data.checked_at },
+      "SiteGuard poll successful"
+    );
+  }
+
+  // ------------------------------------------------------------ merging
+
+  /** Legacy payload and node payloads as one response; null when there is no data at all. */
+  private buildMerged(): SgHealthResponse | null {
+    const legacy = this._legacyData;
+    const nodes = nodeSites.all();
+    if (nodes.length === 0) return legacy;      // legacy only: exactly as polled
+    return mergeSgPayloads(legacy, nodes, this.reachable, (node, uid) => this.nodeSiteId(node, uid));
+  }
+
+  /** Re-merge with the latest node data and apply it (node updates, legacy failures). */
+  private applyMerged(): void {
+    const merged = this.buildMerged();
+    if (!merged) {
+      if (this._data && this._data.sites.some((s) => s.source === "node")) {
+        // Every node is gone and there is no legacy endpoint.
+        this._data = null;
+        this.pruneNodeSites(new Set());
+        this.persistStatuses();
+      }
+      return;
+    }
+    this.applyMergedData(merged);
+  }
+
+  private applyMergedData(data: SgHealthResponse): void {
+    // Stale-data alerting: the sources answer but nothing has actually checked
+    // the sites for a long time (WordPress cron dead, node registry stopped).
+    // Sites could be down with nobody noticing, so this is alert-worthy -
+    // once, plus a recovery notice.
+    const dataAge = Date.now() / 1000 - (data.checked_at || 0);
     const staleForAlert = dataAge > 2 * SG_STALE_THRESHOLD_SEC;
     if (staleForAlert && !this._staleAlerted) {
       this._staleAlerted = true;
@@ -587,13 +721,37 @@ class SiteGuardClient extends EventEmitter {
       this._staleAlerted = false;
       this.emit("dataFresh");
     }
-
     this.applyData(data);
+  }
 
-    logger.debug(
-      { status: data.status, siteCount: data.sites.length, checkedAt: data.checked_at },
-      "SiteGuard poll successful"
-    );
+  /** Stable id of a node-reported site (persisted in SG_NODE_SITE_IDS, never reused). */
+  private nodeSiteId(node: string, uid: string): number {
+    if (!this._nodeIds) {
+      try {
+        const parsed = JSON.parse(getSetting("SG_NODE_SITE_IDS") ?? "{}");
+        this._nodeIds = parsed && typeof parsed === "object" ? parsed as Record<string, number> : {};
+      } catch {
+        this._nodeIds = {};
+      }
+    }
+    const key = `${node}|${uid}`;
+    let id = this._nodeIds[key];
+    if (!Number.isFinite(id)) {
+      id = Math.max(NODE_SITE_ID_BASE - 1, ...Object.values(this._nodeIds).filter(Number.isFinite)) + 1;
+      this._nodeIds[key] = id;
+      try { setSetting("SG_NODE_SITE_IDS", JSON.stringify(this._nodeIds)); } catch { /* non-fatal */ }
+    }
+    return id;
+  }
+
+  /** Forget per-site state of node sites that are no longer reported. */
+  private pruneNodeSites(present: Set<number>): void {
+    const drop = (id: number) => id >= NODE_SITE_ID_BASE && !present.has(id);
+    for (const id of [...this._previousStatuses.keys()]) if (drop(id)) this._previousStatuses.delete(id);
+    for (const id of [...this._directDown.keys()]) if (drop(id)) this._directDown.delete(id);
+    for (const id of [...this._directFailures.keys()]) if (drop(id)) this._directFailures.delete(id);
+    for (const id of [...this._sslAlerted]) if (drop(id)) this._sslAlerted.delete(id);
+    for (const id of [...this._sslProbeAlerted]) if (drop(id)) this._sslProbeAlerted.delete(id);
   }
 
   private handlePollError(err: unknown): void {
@@ -632,7 +790,9 @@ class SiteGuardClient extends EventEmitter {
     const seedSsl = this._sslSeedSilently;
     this._sslSeedSilently = false;
 
-    this.saveKnownSites(data.sites);
+    // Remembered for direct probes while the endpoint is down: legacy sites only
+    // (node sites are known from the node's last report).
+    if (this._legacyData) this.saveKnownSites(data.sites.filter((s) => s.source !== "node"));
 
     const probeFailed = new Map<number, SgApiAlert>();
     for (const a of Array.isArray(data.alerts) ? data.alerts : []) {
@@ -690,6 +850,11 @@ class SiteGuardClient extends EventEmitter {
         this._sslProbeAlerted.delete(site.site_id);
       }
     }
+    const removed = [...this._previousStatuses.keys()].filter((id) => id >= NODE_SITE_ID_BASE && !data.sites.some((s) => s.site_id === id));
+    if (removed.length) {
+      this.pruneNodeSites(new Set(data.sites.map((s) => s.site_id)));
+      logger.info({ removed }, "SiteGuard: node sites no longer reported, forgotten");
+    }
     this.persistStatuses();
     this.persistSslState();
 
@@ -728,7 +893,11 @@ class SiteGuardClient extends EventEmitter {
       { checkedAt: data.checked_at, siteCount: data.sites.length },
       "SiteGuard force check successful - fresh data applied"
     );
-    this.applyData(data);
+    this._legacyData = data;
+    // Applied like a poll result, without re-deciding staleness here (the next
+    // GET poll does that, as before).
+    const merged = this.buildMerged();
+    if (merged) this.applyData(merged);
   }
 
   getSummary(): { total: number; operational: number; degraded: number; down: number } {
@@ -754,6 +923,60 @@ class SiteGuardClient extends EventEmitter {
     const warn = parseInt(getSetting("SG_SSL_WARN_DAYS") ?? "14", 10) || 14;
     return this.sites.filter((s) => s.status !== "unknown" && s.ssl_stale !== true && s.ssl_expiry_days >= 0 && s.ssl_expiry_days <= warn);
   }
+}
+
+const STATUS_RANK: Record<string, number> = { down: 3, degraded: 2, unknown: 1, operational: 0 };
+
+/**
+ * Merge the legacy payload with node payloads. Node site ids are mapped to
+ * bot-wide ids (idFor) and alerts follow them. checked_at is the oldest
+ * among sources that are current (legacy reachable, node polled fine), so a
+ * stale source still raises the stale-data alert, but an unreachable one (which
+ * has its own alert) does not.
+ */
+export function mergeSgPayloads(legacy: SgHealthResponse | null, nodes: NodeSgEntry[], legacyReachable: boolean,
+  idFor: (node: string, uid: string) => number): SgHealthResponse {
+  const sites: SgSite[] = legacy ? [...legacy.sites] : [];
+  const alerts: SgApiAlert[] = legacy && Array.isArray(legacy.alerts) ? [...legacy.alerts] : [];
+  const sources: SgSourceInfo[] = [];
+  const fresh: number[] = [];
+  const all: number[] = [];
+  if (legacy) {
+    sources.push({ kind: "legacy", name: (() => { try { return new URL(legacy.site_url).host; } catch { return "WordPress"; } })(),
+      sites: legacy.sites.length, version: legacy.version, checked_at: legacy.checked_at || 0, current: legacyReachable });
+    all.push(legacy.checked_at || 0);
+    if (legacyReachable) fresh.push(legacy.checked_at || 0);
+  }
+  for (const { node, payload, ok } of nodes) {
+    const ids = new Map<number, number>();
+    for (const row of payload.sites ?? []) {
+      if (!row || typeof row !== "object" || !Number.isFinite(Number(row.site_id))) continue;
+      const uid = typeof row.uid === "string" && row.uid ? row.uid : `${node}:${row.site_id}`;
+      const id = idFor(node, uid);
+      ids.set(Number(row.site_id), id);
+      sites.push({ ...row, site_id: id, source: "node", node, uid } as SgSite);
+    }
+    for (const a of payload.alerts ?? []) {
+      alerts.push({ ...a, site_id: ids.get(Number(a.site_id)) ?? 0 });
+    }
+    sources.push({ kind: "node", name: node, sites: ids.size, version: payload.version, checked_at: payload.checked_at || 0, current: ok });
+    all.push(payload.checked_at || 0);
+    if (ok) fresh.push(payload.checked_at || 0);
+  }
+  const worst = sites.reduce((w, s) => Math.max(w, STATUS_RANK[s.status] ?? 1), 0);
+  const downAll = sites.length > 0 && sites.every((s) => s.status === "down");
+  return {
+    status: downAll ? "down" : worst >= 2 ? "degraded" : sites.length ? "operational" : "unknown",
+    site_url: legacy?.site_url ?? `wpops://${nodes[0]?.node ?? "node"}`,
+    checked_at: fresh.length ? Math.min(...fresh) : Math.max(0, ...all),
+    check_interval: legacy?.check_interval ?? 60,
+    check_interval_label: legacy?.check_interval_label ?? "wpops",
+    sites,
+    version: legacy?.version ?? nodes[0]?.payload.version ?? "",
+    api_version: 2,
+    alerts,
+    sources,
+  };
 }
 
 export const siteguard = new SiteGuardClient();

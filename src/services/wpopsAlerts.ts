@@ -14,6 +14,7 @@ import { getSetting } from "../db/index.js";
 import { discordQueue } from "../queue/index.js";
 import { isSmtpConfigured, sendAlertEmail } from "./email.js";
 import { wpops, fmtBytes, type WpEvent, type WpJob } from "./wpops.js";
+import type { NodeSgSite } from "./nodeSites.js";
 import { suppressedByMaintenance } from "./maintenance.js";
 
 const COLOR = { ok: 0x2ecc71, warn: 0xf39c12, bad: 0xe74c3c, info: 0x3498db } as const;
@@ -70,6 +71,7 @@ export function startWpopsAlerts(client: Client): void {
   });
 
   wpops.on("jobFinished", (node: string, job: WpJob) => {
+    if (job.kind === "registry.refresh") return;   // routine; the sites themselves are reported below
     const ok = job.status === "succeeded";
     const r = (job.result ?? {}) as Record<string, unknown>;
     const failed = Array.isArray(r.failed) ? (r.failed as unknown[]) : [];
@@ -93,6 +95,20 @@ export function startWpopsAlerts(client: Client): void {
     void post(client, embed, `[WordPress ops] ${title.replace(/[*`]/g, "")}`, html);
     // Failover state changed: refresh the board right away.
     if (job.kind.startsWith("failover")) void wpops.poll();
+  });
+
+  // Sites joining or leaving a node's registry: one short notice per node and
+  // poll (never e-mailed). They are monitored (or dropped) automatically.
+  wpops.on("sitesChanged", (node: string, added: NodeSgSite[], removed: NodeSgSite[]) => {
+    const name = (s: NodeSgSite) => `\`${s.uid}\` ${s.url}${s.slug ? ` (${s.slug})` : ""}`;
+    const lines: string[] = [];
+    if (added.length) lines.push(`**Now monitored (${added.length}):**`, ...added.slice(0, 15).map((s) => `• ${name(s)}`));
+    if (added.length > 15) lines.push(`… ${added.length - 15} more`);
+    if (removed.length) lines.push(`**No longer on the node (${removed.length}):**`, ...removed.slice(0, 15).map((s) => `• ${name(s)}`));
+    if (removed.length > 15) lines.push(`… ${removed.length - 15} more`);
+    const title = `🗂️ ${node}: ${added.length ? `${added.length} site(s) added` : ""}${added.length && removed.length ? ", " : ""}${removed.length ? `${removed.length} removed` : ""}`;
+    const embed = new EmbedBuilder().setTitle(title).setDescription(lines.join("\n").slice(0, 4000)).setColor(COLOR.info).setTimestamp();
+    void post(client, embed, `[WordPress ops] ${title}`, "", false);
   });
 
   wpops.on("nodeUnreachable", (node: string, msg: string) => {

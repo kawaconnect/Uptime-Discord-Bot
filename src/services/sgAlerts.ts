@@ -44,6 +44,7 @@ import {
   siteguard,
   sgStatusEmoji,
   sgSiteLabel,
+  sgSiteSource,
   isConfigErrorKind,
   type SgSite,
   type SgErrorKind,
@@ -499,7 +500,7 @@ export async function runReminders(client: Client): Promise<void> {
 
 async function sendSiteDownAlert(client: Client, site: SgSite): Promise<void> {
   lastSentAt.set(`site:${site.site_id}`, Date.now());
-  const source = site.check_method === "bot-direct" ? "bot direct probe" : "SiteGuard (WordPress)";
+  const source = sgSiteSource(site);
   const label = sgSiteLabel(site);
 
   // Discord first - it is the fastest path - then helpdesk (email → API fallback).

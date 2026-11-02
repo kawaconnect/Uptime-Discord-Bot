@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.9] - 2026-11-02
+
+### Added
+- Sites on WordPress nodes are monitored one by one. A node registers once
+  (`/wp node add`, its agent token); every single-site stack and multisite blog
+  it reports (`GET /v1/siteguard/health`, WPMultisiteDocker 0.0.7) gets the
+  same down/recovery/SSL alerts, reminders, tickets, pauses and `/sg-monitors`
+  entries as a SiteGuard site, with stable ids from 100000 up. Sites added to or
+  removed from a node follow automatically, with one notice per change.
+- `/wp sites` lists every site per node with health, WordPress/PHP versions,
+  last backup and disk use (`node` option to pick one).
+- Status board: one line per node with `N/M sites up`; the legacy SiteGuard
+  line counts its own sites only.
+- Node events are read by sequence number when the agent provides one, so no
+  event is skipped when several share a second.
+
+### Changed
+- The SiteGuard monitor also runs without a single SiteGuard endpoint when
+  nodes report sites. `/sg-setup disconnect` stops only that endpoint (and
+  forgets its sites for direct probes); node sites stay monitored.
+- Older agents and the single SiteGuard endpoint work as before.
+
 ## [1.1.8] - 2026-10-30
 
 ### Fixed
