@@ -73,8 +73,8 @@ export function startWpopsAlerts(client: Client): void {
   wpops.on("jobFinished", (node: string, job: WpJob) => {
     if (job.kind === "registry.refresh") return;   // routine; the sites themselves are reported below
     const ok = job.status === "succeeded";
-    // A restore run from the node's own CLI is the operator's business: no post.
-    if (job.kind === "restore.apply" && job.actor.startsWith("cli:") && ok) return;
+    // A restore or pull run from the node's own CLI is the operator's business: no post.
+    if ((job.kind === "restore.apply" || job.kind === "backup.pull") && job.actor.startsWith("cli:") && ok) return;
     // Backup pulls: nothing per job. A scheduled run is reported once, by the
     // agent's run summary (backup.run_failed) and only when something failed.
     // A pull someone started by hand gets one Discord line, never an e-mail.

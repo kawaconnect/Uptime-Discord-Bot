@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.13] - 2026-11-03
+
+### Changed
+- A successful backup pull run from the node's own command line is not
+  posted, like a restore run there. Failures are still posted.
+
 ## [1.1.12] - 2026-11-03
 
 ### Changed
