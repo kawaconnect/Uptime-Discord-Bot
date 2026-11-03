@@ -447,7 +447,7 @@ export async function runReminders(client: Client): Promise<void> {
           `The SiteGuard health endpoint has been unreachable for **${dur}**.\n\n` +
           `**Last error:** ${siteguard.lastError || "unknown"}\n` +
           `**Impact:** Site health is unknown - outages may be going undetected.\n\n` +
-          `Check the WordPress server (wp.example.com) and the SiteGuard plugin now.`
+          `Check the WordPress server behind the SiteGuard endpoint and its SiteGuard plugin now.`
         )
         .setColor(0xe74c3c)
         .setTimestamp(new Date());

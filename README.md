@@ -354,6 +354,12 @@ channel. Health comes from each stack's own SiteGuard (the node holds a key
 for it) or from the node's direct check; the bot's own direct probe covers the
 legacy endpoint's sites only, unless `SG_DIRECT_PROBE_NODES=true`.
 
+To monitor the sites of some nodes only, set `WPOPS_SITE_NODES` to a
+comma-separated list of node names (unset: every node). A node left out, such
+as a standby that holds copies of production sites, is still polled for
+status, backups, jobs, events and reachability, and shows on the status board
+as a backup node, but its sites are not monitored.
+
 The single SiteGuard endpoint (`/sg-setup connect`) still works, alone or next
 to nodes; node sites get ids from 100000 up so they never collide with its blog
 ids. `/sg-setup disconnect` stops only that endpoint. Older agents (no

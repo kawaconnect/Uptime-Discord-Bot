@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.10] - 2026-11-03
+
+### Added
+- `WPOPS_SITE_NODES`: comma-separated node names whose sites are monitored
+  (unset: every node). A standby node left out of the list is still polled
+  for status, backups, jobs, events and reachability, but its copies of the
+  production sites are not monitored and never alert.
+
+### Changed
+- The "WordPress unreachable" reminder no longer names a fixed server; it
+  refers to the server behind the configured SiteGuard endpoint.
+- `/wp backup now`: the source option no longer suggests a retired origin.
+
 ## [1.1.9] - 2026-11-02
 
 ### Added

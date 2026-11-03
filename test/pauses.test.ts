@@ -51,7 +51,7 @@ function fleet(): Map<number, KumaMonitor> {
     mon(81, "SOU", null, "group"),
     mon(9, "SOU-C01", 81, "ping"),
     mon(20, "SOU-C01 Storefront.example", 81),
-    mon(26, "KC-Azure Wordpress Server", null, "ping"),
+    mon(26, "KC WordPress Server", null, "ping"),
   ];
   return new Map(list.map((m) => [m.id, m]));
 }

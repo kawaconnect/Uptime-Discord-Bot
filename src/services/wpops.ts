@@ -200,6 +200,23 @@ function nodesFromEnv(): WpNode[] {
   return out;
 }
 
+/**
+ * Nodes whose sites the bot monitors (WPOPS_SITE_NODES, comma-separated).
+ * Unset or empty: every node. A node left out is still polled for status,
+ * jobs, backups, events and reachability, but its sites are not monitored
+ * (a standby node's copies would otherwise alert as if they were production).
+ */
+export function siteNodes(): Set<string> | null {
+  const raw = (getSetting("WPOPS_SITE_NODES") ?? process.env.WPOPS_SITE_NODES ?? "").trim();
+  if (!raw) return null;
+  return new Set(raw.split(",").map((s) => s.trim()).filter(Boolean));
+}
+
+export function monitorsSitesOf(name: string): boolean {
+  const only = siteNodes();
+  return !only || only.has(name);
+}
+
 export function getNodes(): WpNode[] {
   const raw = getSetting(NODES_KEY);
   if (raw) {
@@ -401,6 +418,12 @@ class WpopsService extends EventEmitter {
    * means an agent without the registry: nothing changes for that node.
    */
   private async pollSites(node: WpNode, c: WpopsClient, snap: NodeSnapshot): Promise<void> {
+    if (!monitorsSitesOf(node.name)) {
+      // Standby node: status, backups and events only.
+      snap.registry = false;
+      nodeSites.remove(node.name);
+      return;
+    }
     const skippedAt = this.noRegistry.get(node.name);
     if (skippedAt && Date.now() - skippedAt < REGISTRY_RECHECK_MS) return;
     let payload: NodeSgPayload;
