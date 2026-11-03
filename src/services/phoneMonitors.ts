@@ -21,5 +21,14 @@ export function planPhoneEscalation(
       report.push(monitor);
     }
   }
+  // A monitor deleted from Kuma can never report UP again: resolve its
+  // escalation instead of letting the PBX keep calling about it. Only with a
+  // monitor list in hand; an empty map means no snapshot yet, not "deleted".
+  if (monitors.size > 0) {
+    for (const key of trackedSet) {
+      const m = /^kuma:monitor:(\d+)$/.exec(key);
+      if (m && !monitors.has(Number(m[1])) && !resolve.includes(key)) resolve.push(key);
+    }
+  }
   return { report, resolve };
 }

@@ -192,6 +192,18 @@ async function doUpdateStatusBoard(client: Client): Promise<void> {
   }
 }
 
+/**
+ * Display name for a WordPress node: WPOPS_NODE_LABELS="web01=web01 (production),web02=web02 (standby)".
+ * A label containing "standby" shows stacks ready instead of sites up.
+ */
+export function nodeLabel(name: string): string {
+  for (const part of (process.env.WPOPS_NODE_LABELS ?? "").split(",")) {
+    const [k, v] = part.split("=", 2).map((x) => x?.trim());
+    if (k === name && v) return v;
+  }
+  return `${name} (node)`;
+}
+
 function buildStatusEmbed(): EmbedBuilder {
   const monitors = kuma.monitors;
   const latestStatus = kuma.latestStatus;
@@ -211,6 +223,9 @@ function buildStatusEmbed(): EmbedBuilder {
   const topLevel = groups.get(null) ?? [];
   topLevel.sort((a, b) => a.name.localeCompare(b.name));
 
+  // Groups first; monitors without a group go under "Other" at the end, so
+  // they never render as if they belonged to the group listed above them.
+  const ungrouped: KumaMonitor[] = [];
   for (const monitor of topLevel) {
     const children = groups.get(monitor.id);
     if (children && children.length > 0) {
@@ -220,8 +235,12 @@ function buildStatusEmbed(): EmbedBuilder {
         kumaLines.push(formatMonitorLine(child, latestStatus));
       }
     } else if (monitor.type !== "group") {
-      kumaLines.push(formatMonitorLine(monitor, latestStatus));
+      ungrouped.push(monitor);
     }
+  }
+  if (ungrouped.length > 0) {
+    kumaLines.push(`\n**Other**`);
+    for (const monitor of ungrouped) kumaLines.push(formatMonitorLine(monitor, latestStatus));
   }
 
   // ---- SiteGuard section ----
@@ -300,22 +319,33 @@ function buildStatusEmbed(): EmbedBuilder {
     }
     for (const snap of wpops.snapshots.values()) {
       const st = snap.status;
+      const label = nodeLabel(snap.node.name);
+      const standby = /standby/i.test(label);
       if (!st || snap.error) {
-        description += `\n\u26A0\uFE0F **${snap.node.name} (backup node)** - agent unreachable`;
+        description += `\n\u26A0\uFE0F **${label}** - agent unreachable`;
         continue;
       }
-      const stacksOk = Object.values(st.stacks).every((s) => s.healthy);
+      const stacks = Object.values(st.stacks);
+      const stacksReady = stacks.filter((s) => s.healthy).length;
+      const stacksOk = stacksReady === stacks.length;
       const tReady = st.tunnels.filter((t) => t.ready).length;
-      const latest = Object.values(st.backups.latest).map((b) => b.pulled_at).filter(Boolean).sort().pop() ?? null;
+      const latestSets = Object.values(st.backups.latest);
+      const latest = latestSets.map((b) => b.pulled_at).filter(Boolean).sort().pop() ?? null;
       const lowDisk = (st.disk ?? []).filter((d) => d.low);
       const flag = stacksOk && !lowDisk.length ? sgStatusEmoji(SgStatus.OPERATIONAL) : stacksOk ? sgStatusEmoji(SgStatus.DEGRADED) : sgStatusEmoji(SgStatus.DOWN);
       const diskNote = lowDisk.length ? `, \u26A0\uFE0F LOW DISK ${lowDisk.map((d) => `${d.label} ${Math.round(d.free / 2 ** 30)} GB free`).join(", ")}` : "";
       const nodeSites = siteguard.sitesOf(snap.node.name);
       const nc = countSites(nodeSites, directDown);
-      const sitesNote = snap.registry && nodeSites.length ? `${nc.up}/${nc.total} sites up, ` : "";
+      const parts: string[] = [];
+      if (!standby && snap.registry && nodeSites.length) parts.push(`${nc.up}/${nc.total} sites up`);
+      parts.push(`${stacksReady}/${stacks.length} ${stacks.length === 1 ? "stack" : "stacks"} ${standby ? "ready" : "healthy"}`);
+      if (standby && snap.registry && nodeSites.length && nc.up < nc.total) parts.push(`${nc.total - nc.up} standby site(s) down`);
+      parts.push(`tunnels ${tReady}/${st.tunnels.length}`);
+      if (latest) parts.push(`last backup ${fmtAgo(latest)} (${latestSets.length} source${latestSets.length === 1 ? "" : "s"})`);
+      else if (standby) parts.push("no backup yet");
+      if (st.override_count) parts.push(`\u{1F534} serving ${st.override_count} domain(s)`);
       const nodeFlag = nc.down > 0 && stacksOk ? sgStatusEmoji(SgStatus.DEGRADED) : flag;
-      const stackWord = Object.keys(st.stacks).length > 1 ? "stacks" : "stack";
-      description += `\n${nodeFlag} **${snap.node.name} (${snap.registry ? "node" : "backup node"})** - ${sitesNote}${stackWord} ${stacksOk ? "healthy" : "PROBLEM"}, tunnels ${tReady}/${st.tunnels.length}, last backup ${fmtAgo(latest)}${diskNote}${st.override_count ? `, \u{1F534} serving ${st.override_count} domain(s)` : ""}`;
+      description += `\n${nodeFlag} **${label}** - ${parts.join(", ")}${diskNote}`;
     }
   }
 

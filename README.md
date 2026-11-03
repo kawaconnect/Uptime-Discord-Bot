@@ -354,6 +354,10 @@ channel. Health comes from each stack's own SiteGuard (the node holds a key
 for it) or from the node's direct check; the bot's own direct probe covers the
 legacy endpoint's sites only, unless `SG_DIRECT_PROBE_NODES=true`.
 
+`WPOPS_NODE_LABELS` names the nodes on the status board, e.g.
+`web01=web01 (production),web02=web02 (standby)`. A label containing
+"standby" shows stacks ready and the last backup instead of sites up.
+
 To monitor the sites of some nodes only, set `WPOPS_SITE_NODES` to a
 comma-separated list of node names (unset: every node). A node left out, such
 as a standby that holds copies of production sites, is still polled for

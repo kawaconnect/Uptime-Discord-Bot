@@ -2,6 +2,26 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.11] - 2026-11-03
+
+### Fixed
+- A Kuma monitor deleted while it was down no longer keeps its phone
+  escalation open: when it is missing from Kuma's monitor list, the incident
+  is resolved at the PBX and nothing calls about it again.
+- Monitors without a Kuma group are listed under "Other" on the status board,
+  not under whichever group happened to come before them.
+
+### Changed
+- Backup pulls no longer post or e-mail once per job or per source. A
+  scheduled run is reported once, by the agent's run summary
+  (`backup.run_failed`, WPMultisiteDocker 0.0.12), and only when something
+  failed. A pull started by hand gets one Discord line and no e-mail. Older
+  agents' per-source failures are posted to Discord without e-mail.
+- Status board: one line per WordPress node with its display name from
+  `WPOPS_NODE_LABELS` (e.g. `web01=web01 (production),web02=web02 (standby)`).
+  A production node shows sites up, stacks healthy and tunnels; a standby node
+  shows stacks ready, tunnels and its last backup.
+
 ## [1.1.10] - 2026-11-03
 
 ### Added

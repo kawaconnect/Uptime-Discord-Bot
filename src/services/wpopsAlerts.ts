@@ -73,6 +73,17 @@ export function startWpopsAlerts(client: Client): void {
   wpops.on("jobFinished", (node: string, job: WpJob) => {
     if (job.kind === "registry.refresh") return;   // routine; the sites themselves are reported below
     const ok = job.status === "succeeded";
+    // Backup pulls: nothing per job. A scheduled run is reported once, by the
+    // agent's run summary (backup.run_failed) and only when something failed.
+    // A pull someone started by hand gets one Discord line, never an e-mail.
+    if (job.kind === "backup.pull") {
+      if (job.actor === "scheduler") return;
+      const r0 = (job.result ?? {}) as Record<string, unknown>;
+      const t = ok ? `✅ ${node}: ${describeJob(job)} finished` : `❌ ${node}: ${describeJob(job)} FAILED`;
+      const d = ok ? `Set \`${r0.set}\` - ${fmtBytes(Number(r0.bytes ?? 0))}` : `Error: ${(job.error || "unknown").slice(0, 500)}`;
+      void post(client, new EmbedBuilder().setTitle(t).setDescription(d).setColor(ok ? COLOR.ok : COLOR.bad).setTimestamp(), "", "", false);
+      return;
+    }
     const r = (job.result ?? {}) as Record<string, unknown>;
     const failed = Array.isArray(r.failed) ? (r.failed as unknown[]) : [];
     const title = ok && failed.length === 0 ? `✅ ${node}: ${describeJob(job)} finished` : `❌ ${node}: ${describeJob(job)} ${ok ? "finished with errors" : "FAILED"}`;
@@ -126,20 +137,24 @@ async function handleEvent(client: Client, node: string, ev: WpEvent): Promise<v
   // Job completions are reported through jobFinished (richer); here we cover
   // the scheduler and anything that happened without a job the bot watched.
   switch (ev.kind) {
-    case "backup.pulled": {
-      if (!ev.scheduled && wpopsSawJob(ev)) return;
-      const embed = new EmbedBuilder()
-        .setTitle(`💾 ${node}: backup pulled from ${ev.source ?? "?"}`)
-        .setDescription([`Set: \`${ev.set}\` - ${fmtBytes(Number(ev.bytes ?? 0))}, ${ev.files} files, ${ev.sites} sites`,
-          "Not applied. Use **/wp restore** (or the panel) to apply it.",
-          Array.isArray(ev.pruned) && (ev.pruned as string[]).length ? `Pruned: ${(ev.pruned as string[]).join(", ")}` : ""].filter(Boolean).join("\n"))
-        .setColor(COLOR.ok).setTimestamp(ev.ts * 1000);
-      await post(client, embed, `[WordPress ops] backup pulled on ${node}: ${ev.set}`, `<p>${esc(ev.subject)}</p><p>Set ${esc(ev.set)}, ${fmtBytes(Number(ev.bytes ?? 0))}. Not applied automatically.</p>`);
+    case "backup.pulled":
+      // One per source per run: never posted or e-mailed (see backup.run_failed).
+      return;
+    case "backup.failed": {
+      // Older agents report each failed source separately: Discord only, no e-mail.
+      const embed = new EmbedBuilder().setTitle(`❌ ${node}: scheduled backup from ${ev.source ?? "?"} failed`).setDescription(String(ev.subject ?? "")).setColor(COLOR.bad).setTimestamp(ev.ts * 1000);
+      await post(client, embed, "", "", false);
       return;
     }
-    case "backup.failed": {
-      const embed = new EmbedBuilder().setTitle(`❌ ${node}: scheduled backup from ${ev.source ?? "?"} failed`).setDescription(String(ev.subject ?? "")).setColor(COLOR.bad).setTimestamp(ev.ts * 1000);
-      await post(client, embed, `[WordPress ops] scheduled backup FAILED on ${node}`, `<p>${esc(ev.subject)}</p><pre>${esc(ev.body ?? "")}</pre>`);
+    case "backup.run_failed": {
+      // Agents from WPMultisiteDocker 0.0.12: one summary per scheduled run, sent only on failure.
+      const failed = Array.isArray(ev.failed) ? (ev.failed as { source: string; error?: string }[]) : [];
+      const total = Number(ev.total ?? 0);
+      const lines = failed.slice(0, 25).map((f) => `• **${f.source}**: ${String(f.error ?? "").slice(0, 150)}`);
+      if (failed.length > 25) lines.push(`… ${failed.length - 25} more`);
+      const title = `❌ ${node}: nightly backup - ${failed.length} of ${total} source(s) failed`;
+      const embed = new EmbedBuilder().setTitle(title).setDescription(lines.join("\n").slice(0, 4000) || String(ev.subject ?? "")).setColor(COLOR.bad).setTimestamp(ev.ts * 1000);
+      await post(client, embed, `[WordPress ops] ${title}`, `<h2>${esc(title)}</h2><pre>${esc(lines.join("\n"))}</pre>`);
       return;
     }
     case "failover.applied": {
@@ -196,16 +211,4 @@ async function handleEvent(client: Client, node: string, ev: WpEvent): Promise<v
     default:
       return;
   }
-}
-
-/** Events produced by jobs the bot already announced through jobFinished are skipped. */
-function wpopsSawJob(ev: WpEvent): boolean {
-  const set = String(ev.set ?? "");
-  for (const snap of wpops.snapshots.values()) {
-    for (const j of snap.status?.jobs.recent ?? []) {
-      const r = (j.result ?? {}) as Record<string, unknown>;
-      if (j.kind === "backup.pull" && r.set === set && j.actor !== "scheduler") return true;
-    }
-  }
-  return false;
 }

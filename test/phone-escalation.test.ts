@@ -44,6 +44,16 @@ test("only leaf monitors call; confirmed recovery and deliberate pauses still cl
   assert.deepEqual(planPhoneEscalation(monitors, new Map([[32, 0]]), tracked, id => id === 32), { report: [], resolve: [tracked[0]] });
 });
 
+test("a monitor deleted from Kuma resolves its escalation instead of calling again", () => {
+  // Monitor 87 was DOWN with an open escalation, then deleted from Kuma.
+  const trackedDeleted = ["kuma:monitor:87", "kuma:monitor:32", "sg:site:10"];
+  const plan = planPhoneEscalation(monitors, new Map([[32, MonitorStatus.DOWN]]), trackedDeleted, () => false);
+  assert.deepEqual(plan.resolve, ["kuma:monitor:87"]);
+  assert.deepEqual(plan.report.map(m => m.id), [32]);
+  // Without a monitor list (not connected yet) nothing counts as deleted.
+  assert.deepEqual(planPhoneEscalation(new Map(), new Map(), trackedDeleted, () => false).resolve, []);
+});
+
 test("real sweep preserves a PBX acknowledgement across repeated reconnects and rearms on actual UP", async () => {
   const originalFetch = globalThis.fetch;
   const incidents = new Map<string, boolean>([[tracked[0], true]]);
