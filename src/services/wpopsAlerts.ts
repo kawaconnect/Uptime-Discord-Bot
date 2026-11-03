@@ -75,6 +75,9 @@ export function startWpopsAlerts(client: Client): void {
     const ok = job.status === "succeeded";
     // A restore or pull run from the node's own CLI is the operator's business: no post.
     if ((job.kind === "restore.apply" || job.kind === "backup.pull") && job.actor.startsWith("cli:") && ok) return;
+    // The nightly run (pulls and the standby restores that follow) is reported
+    // once by the agent's run summary, only on failure.
+    if (job.actor === "scheduler") return;
     // Backup pulls: nothing per job. A scheduled run is reported once, by the
     // agent's run summary (backup.run_failed) and only when something failed.
     // A pull someone started by hand gets one Discord line, never an e-mail.

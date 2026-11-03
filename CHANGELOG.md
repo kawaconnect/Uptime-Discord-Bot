@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.14] - 2026-11-03
+
+### Changed
+- Jobs started by a node agent's scheduler (nightly pulls and the standby
+  restores that follow them, WPMultisiteDocker 0.0.16) are not posted one by
+  one; the run summary reports failures once.
+
 ## [1.1.13] - 2026-11-03
 
 ### Changed
