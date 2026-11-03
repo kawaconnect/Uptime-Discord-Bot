@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.12] - 2026-11-03
+
+### Changed
+- WordPress job notices are e-mailed (and so open a helpdesk ticket) only for
+  failovers and their rollbacks. Restores are posted to Discord only; a
+  successful restore run from the node's own command line is not posted, and
+  the "backup applied" event is not posted again for a restore already
+  reported.
+
 ## [1.1.11] - 2026-11-03
 
 ### Fixed

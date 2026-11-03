@@ -73,6 +73,8 @@ export function startWpopsAlerts(client: Client): void {
   wpops.on("jobFinished", (node: string, job: WpJob) => {
     if (job.kind === "registry.refresh") return;   // routine; the sites themselves are reported below
     const ok = job.status === "succeeded";
+    // A restore run from the node's own CLI is the operator's business: no post.
+    if (job.kind === "restore.apply" && job.actor.startsWith("cli:") && ok) return;
     // Backup pulls: nothing per job. A scheduled run is reported once, by the
     // agent's run summary (backup.run_failed) and only when something failed.
     // A pull someone started by hand gets one Discord line, never an e-mail.
@@ -103,7 +105,9 @@ export function startWpopsAlerts(client: Client): void {
     lines.push(`Job \`${job.id}\` by ${job.actor}`);
     const embed = new EmbedBuilder().setTitle(title).setDescription(lines.join("\n")).setColor(ok && failed.length === 0 ? COLOR.ok : COLOR.bad).setTimestamp();
     const html = `<h2>${esc(title)}</h2><pre>${esc(lines.join("\n"))}</pre>`;
-    void post(client, embed, `[WordPress ops] ${title.replace(/[*`]/g, "")}`, html);
+    // E-mail (and so a helpdesk ticket) only for failovers; restores and other
+    // jobs are started by someone in Discord and reported there.
+    void post(client, embed, `[WordPress ops] ${title.replace(/[*`]/g, "")}`, html, job.kind.startsWith("failover"));
     // Failover state changed: refresh the board right away.
     if (job.kind.startsWith("failover")) void wpops.poll();
   });
@@ -182,7 +186,9 @@ async function handleEvent(client: Client, node: string, ev: WpEvent): Promise<v
     case "restore.applied": {
       const embed = new EmbedBuilder().setTitle(`🧩 ${node}: backup applied on stack ${ev.stack ?? "?"}`)
         .setDescription(`Set \`${ev.set}\` restored (${Array.isArray(ev.sites) ? (ev.sites as string[]).join(", ") : ev.sites ?? "all sites"}).`).setColor(COLOR.ok).setTimestamp(ev.ts * 1000);
-      await post(client, embed, `[WordPress ops] backup applied on ${node}`, `<p>${esc(ev.subject)}</p>`);
+      // The restore job is already reported (Discord); skip it when the bot saw the job.
+      if (sawRestoreJob(ev)) return;
+      await post(client, embed, `[WordPress ops] backup applied on ${node}`, "", false);
       return;
     }
     case "disk.low": {
@@ -211,4 +217,15 @@ async function handleEvent(client: Client, node: string, ev: WpEvent): Promise<v
     default:
       return;
   }
+}
+
+/** A restore.applied event whose job the bot already reported through jobFinished. */
+function sawRestoreJob(ev: WpEvent): boolean {
+  const job = String(ev.job ?? "");
+  for (const snap of wpops.snapshots.values()) {
+    for (const j of snap.status?.jobs.recent ?? []) {
+      if (j.kind === "restore.apply" && (j.id === job || ((j.result ?? {}) as Record<string, unknown>).set === ev.set)) return true;
+    }
+  }
+  return false;
 }
