@@ -44,6 +44,14 @@ test("only leaf monitors call; confirmed recovery and deliberate pauses still cl
   assert.deepEqual(planPhoneEscalation(monitors, new Map([[32, 0]]), tracked, id => id === 32), { report: [], resolve: [tracked[0]] });
 });
 
+test("a no-phone tagged monitor never calls and clears a call already running", () => {
+  const exempt: KumaMonitor = { ...leaf, id: 40, tags: [{ id: 1, name: " No-Phone ", color: "#000", value: "" }] };
+  const all = new Map<number, KumaMonitor>([[32, leaf], [40, exempt]]);
+  const plan = planPhoneEscalation(all, new Map([[32, 0], [40, 0]]), ["kuma:monitor:40"], () => false);
+  assert.deepEqual(plan.report.map(m => m.id), [32]);
+  assert.deepEqual(plan.resolve, ["kuma:monitor:40"]);
+});
+
 test("a monitor deleted from Kuma resolves its escalation instead of calling again", () => {
   // Monitor 87 was DOWN with an open escalation, then deleted from Kuma.
   const trackedDeleted = ["kuma:monitor:87", "kuma:monitor:32", "sg:site:10"];

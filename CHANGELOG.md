@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.15] - 2026-11-07
+
+### Added
+- Kuma tag `no-phone`: a tagged monitor still alerts in Discord and by email
+  but never starts a phone call, and a call already running for it is cleared.
+  For informational monitors such as "restart needed".
+
 ## [1.1.14] - 2026-11-03
 
 ### Changed

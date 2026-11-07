@@ -287,6 +287,10 @@ survive restarts.
 
 ### Pausing a Kuma monitor
 
+A monitor tagged `no-phone` in Uptime Kuma (any color, no value needed) still
+alerts in Discord and by email but never starts a phone call. Use it for
+informational monitors such as "restart needed" pushes.
+
 `/pause` pauses a monitor in Uptime Kuma itself: Kuma stops checking it, so
 there are no alerts, emails or phone calls for it until it is resumed.
 

@@ -1,5 +1,13 @@
 import { MonitorStatus, type KumaMonitor } from "./kuma.js";
 
+/** Kuma tag that keeps a monitor's Discord/email alerts but never rings a phone. */
+export const NO_PHONE_TAG = "no-phone";
+
+/** True when the monitor carries the no-phone tag (case-insensitive). */
+export function isPhoneExempt(monitor: KumaMonitor): boolean {
+  return (monitor.tags ?? []).some((t) => (t.name || "").trim().toLowerCase() === NO_PHONE_TAG);
+}
+
 /** Missing snapshot data is not evidence that an outage recovered. */
 export function planPhoneEscalation(
   monitors: ReadonlyMap<number, KumaMonitor>,
@@ -15,7 +23,8 @@ export function planPhoneEscalation(
     if (monitor.type === "group") continue;
     const status = statuses.get(id);
     const key = `kuma:monitor:${id}`;
-    if (isPaused(id) || status === MonitorStatus.MAINTENANCE || status === MonitorStatus.UP) {
+    // Informational monitors (e.g. "restart needed") alert in Discord/email only.
+    if (isPhoneExempt(monitor) || isPaused(id) || status === MonitorStatus.MAINTENANCE || status === MonitorStatus.UP) {
       if (trackedSet.has(key)) resolve.push(key);
     } else if (status === MonitorStatus.DOWN) {
       report.push(monitor);
