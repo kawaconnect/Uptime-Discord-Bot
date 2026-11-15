@@ -1,6 +1,6 @@
 {
   "name": "uptimekuma-discord-bot",
-  "version": "1.1.15",
+  "version": "1.1.16",
   "description": "Discord bot for Uptime Kuma monitoring - real-time status board and alerts",
   "main": "dist/index.js",
   "scripts": {
@@ -8,7 +8,7 @@
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "SG_SITE_DOWN_FAILS=1 node --import tsx --test test/*.test.ts",
     "lint": "tsc -p tsconfig.test.json"
   },
   "engines": {

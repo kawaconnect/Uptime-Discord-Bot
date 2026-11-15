@@ -41,6 +41,10 @@ const envSchema = z.object({
   // SiteGuard endpoint). "false" disables. Down after N consecutive failures.
   SG_DIRECT_PROBE: z.string().optional(),
   SG_DIRECT_PROBE_FAILS: z.coerce.number().default(2),
+  // A down report from SiteGuard itself (the node checks its own sites from inside the node) counts only after this
+  // many consecutive failures, unless the bot's own probe from the cluster also fails. One failed self-check was a
+  // loopback blip on the node, not an outage (seen as false positives on one node).
+  SG_SITE_DOWN_FAILS: z.coerce.number().default(3),
 
   // Phone escalation - optional. When enabled, a monitor that stays down is
   // reported to the PBX connector, which decides when to actually call and

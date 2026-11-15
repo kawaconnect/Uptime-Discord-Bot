@@ -414,6 +414,11 @@ class SiteGuardClient extends EventEmitter {
     try { setSetting("SG_KNOWN_SITES", JSON.stringify(this._knownSites)); } catch { /* non-fatal */ }
   }
 
+  /** Consecutive SiteGuard failures before its own down report counts (SG_SITE_DOWN_FAILS, at least 1). */
+  private siteDownThreshold(): number {
+    return Math.max(1, Number(env().SG_SITE_DOWN_FAILS) || 3);
+  }
+
   /** Is the site currently down according to EITHER source? */
   private isDown(siteId: number): boolean {
     return this._previousStatuses.get(siteId) === "down" || this._directDown.has(siteId);
@@ -813,7 +818,18 @@ class SiteGuardClient extends EventEmitter {
       // recovery for a site that may still be down.
       const wasDown = this.isDown(site.site_id);
       const prev = this._previousStatuses.get(site.site_id);
-      this._previousStatuses.set(site.site_id, site.status === "unknown" && prev ? prev : site.status);
+      // A SiteGuard "down" below the confirmation threshold, not seen by the bot's own probe and not already down,
+      // is a self-check blip on the node: keep the previous status (no ticket, no @everyone).
+      // A missing, null or 0 counter (node reports, older SiteGuard) counts as one failure.
+      const reportedFails = Number(site.consecutive_failures) >= 1 ? Number(site.consecutive_failures) : 1;
+      const unconfirmed = site.status === "down" && !wasDown && !this._directDown.has(site.site_id) &&
+        reportedFails < this.siteDownThreshold();
+      if (unconfirmed) {
+        logger.info({ site: site.domain, fails: site.consecutive_failures, error: site.error },
+          "SiteGuard reports down, not confirmed yet (threshold or bot probe): waiting");
+      }
+      this._previousStatuses.set(site.site_id,
+        unconfirmed ? (prev && prev !== "down" ? prev : "operational") : site.status === "unknown" && prev ? prev : site.status);
       const nowDown = this.isDown(site.site_id);
       if (!wasDown && nowDown) {
         this.emit("siteDown", site);

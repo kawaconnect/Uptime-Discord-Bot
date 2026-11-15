@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## [1.1.16] - 2026-11-15
+
+### Fixed
+- False "site down" tickets for WordPress sites on one node. SiteGuard checks each site from inside its own node, and a
+  single failed self-check (e.g. `cURL error 7 ... after 169 ms`) raised a ticket while visitors could reach the
+  site. A SiteGuard down report now counts only after `SG_SITE_DOWN_FAILS` consecutive failures (default 3), or
+  at once when the bot's own probe from the cluster also fails. Real outages still alert within a few minutes.
+
 ## [1.1.15] - 2026-11-07
 
 ### Added
