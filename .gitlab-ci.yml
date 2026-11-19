@@ -28,7 +28,7 @@ include:
 check:
   stage: test
   tags: [linux]
-  image: node:24-alpine
+  image: node:26-alpine
   interruptible: true
   variables:
     GIT_DEPTH: "1"
