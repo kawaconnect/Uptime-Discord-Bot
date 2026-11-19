@@ -75,20 +75,14 @@ async function deployCommands() {
 
   const rest = new REST().setToken(config.DISCORD_TOKEN);
 
+  // Commands are registered on one guild only (DISCORD_GUILD_ID is required):
+  // the bot keeps a single set of channels and settings, so it serves one server.
   try {
-    if (config.DISCORD_GUILD_ID) {
-      await rest.put(
-        Routes.applicationGuildCommands(config.DISCORD_CLIENT_ID, config.DISCORD_GUILD_ID),
-        { body: commands }
-      );
-      logger.info({ guildId: config.DISCORD_GUILD_ID, count: commands.length }, "Slash commands deployed to guild");
-    } else {
-      await rest.put(
-        Routes.applicationCommands(config.DISCORD_CLIENT_ID),
-        { body: commands }
-      );
-      logger.info({ count: commands.length }, "Slash commands deployed globally");
-    }
+    await rest.put(
+      Routes.applicationGuildCommands(config.DISCORD_CLIENT_ID, config.DISCORD_GUILD_ID),
+      { body: commands }
+    );
+    logger.info({ guildId: config.DISCORD_GUILD_ID, count: commands.length }, "Slash commands deployed to guild");
   } catch (err) {
     logger.error({ err }, "Failed to deploy slash commands");
   }

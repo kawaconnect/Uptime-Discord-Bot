@@ -65,7 +65,8 @@ export function configureSmtp(): void {
   // alert email ("self-signed certificate" ESOCKET). Default: verify for public
   // hosts, accept self-signed for cluster-internal hosts. Override with
   // SMTP_TLS_REJECT_UNAUTHORIZED=true|false.
-  const rejectSetting = getSetting("SMTP_TLS_REJECT_UNAUTHORIZED") ?? process.env.SMTP_TLS_REJECT_UNAUTHORIZED;
+  // A blank value (as in .env.example) means "not set", not "verify".
+  const rejectSetting = (getSetting("SMTP_TLS_REJECT_UNAUTHORIZED") ?? process.env.SMTP_TLS_REJECT_UNAUTHORIZED)?.trim() || undefined;
   const internalHost = /\.svc(\.cluster\.local)?\.?$|^localhost$|^127\./i.test(config.host);
   const rejectUnauthorized = rejectSetting !== undefined ? rejectSetting !== "false" : !internalHost;
 
