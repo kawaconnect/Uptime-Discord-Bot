@@ -24,6 +24,11 @@ include:
     ref: main
     file: /docker.yml
 
+variables:
+  # GHCR mirror target for the template's build job (ghcr.io/kawaconnect/<image>).
+  # Also set as a project CI variable; this keeps it visible in the repo.
+  GHCR_OWNER: kawaconnect
+
 # Same base image as both Dockerfile stages.
 check:
   stage: test

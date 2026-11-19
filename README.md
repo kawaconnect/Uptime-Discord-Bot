@@ -246,7 +246,7 @@ do not start a pipeline.
 | Stage | Job | What it does |
 |-------|-----|--------------|
 | `test` | `check` | On `node:26-alpine` (the Dockerfile's base image): `npm ci`, `npm audit --audit-level=high`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`, then `ci/smoke.sh`, which checks `dist/index.js` exists and that the better-sqlite3 native binding loads and runs a query. The bot itself is not started (it needs Discord and Kuma). |
-| `build` | `build` | Builds the `Dockerfile` with Docker-in-Docker on the cluster runner, pushes to the GitLab container registry as `uptime-discord-bot`, and mirrors the tags to `ghcr.io/deenyoro/uptime-discord-bot` (the same name the old GitHub workflow published; skipped if the instance-level `GHCR_TOKEN` variable is unset). Runs only if `check` passed. |
+| `build` | `build` | Builds the `Dockerfile` with Docker-in-Docker on the cluster runner, pushes to the GitLab container registry as `uptime-discord-bot`, and mirrors the tags to `ghcr.io/kawaconnect/uptime-discord-bot` (`GHCR_OWNER` in `.gitlab-ci.yml`; skipped if the instance-level `GHCR_TOKEN` variable is unset). Runs only if `check` passed. |
 
 **Image tags:** every build gets `sha-<short sha>`. A tag `v1.2.3` (or a manual
 run with `RELEASE_VERSION=v1.2.3`) also gets `1.2.3`, `1.2` and `latest`. A
@@ -494,7 +494,3 @@ The `/debug/*` routes exist only when `DEBUG_TOKEN` is set, and then require
 - **Email test fails with a certificate error.** Set
   `SMTP_TLS_REJECT_UNAUTHORIZED=false` only for a relay you trust on a private
   network.
-
-## License
-
-See the repository for license details.
