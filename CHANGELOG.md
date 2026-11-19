@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [1.1.17] - 2026-11-19
+
 ### Security
 - `/wp perms revoke`: only bot admins (`ADMIN_USER_IDS`) can revoke an **admin**
   grant, matching the rule for granting it. A delegated admin could remove
@@ -22,8 +24,8 @@ All notable changes to this project are documented in this file.
   `docker run --env-file` passes through as part of the value.
 
 ### Changed
-- Images are mirrored to `ghcr.io/kawaconnect/uptime-discord-bot` (`GHCR_OWNER` is now
-  also set in `.gitlab-ci.yml`).
+- Images are published to the GitLab registry only (`gitlabreg.kawa.link/dean/uptime-discord-bot/uptime-discord-bot`); nothing goes to
+  GHCR any more, and the GitHub Actions build workflow is removed.
 - README no longer points to license details; no license has been chosen.
 - README: Discord application setup, environment variable reference,
   troubleshooting, and a Docker example that uses a named volume. `.env.example`
