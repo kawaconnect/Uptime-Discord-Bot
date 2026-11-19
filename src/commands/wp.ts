@@ -26,6 +26,7 @@ import {
 } from "discord.js";
 import { randomBytes } from "node:crypto";
 import { logger } from "../util/logger.js";
+import { env } from "../util/env.js";
 import { getSetting, setSetting } from "../db/index.js";
 import { CAPABILITIES, can, capabilitiesOf, grant, isAdminUser, listGrants, memberRoleIds, revoke, type Capability } from "../services/permissions.js";
 import { getNode, getNodes, saveNodes, wpops, WpopsClient, WpopsError, fmtAgo, fmtBytes, type Selection, type WpPlan, type WpRegistry, assertAgentUrl } from "../services/wpops.js";
@@ -97,7 +98,7 @@ export const wpCommand = new SlashCommandBuilder()
     .addSubcommand((s) => s.setName("revoke").setDescription("Revoke a capability (or all)").addUserOption((o) => o.setName("user").setDescription("User")).addRoleOption((o) => o.setName("role").setDescription("Role")).addStringOption((o) => o.setName("capability").setDescription("Capability (omit = all)").addChoices(...CAPABILITIES.map((c) => ({ name: c, value: c })))))
     .addSubcommand((s) => s.setName("list").setDescription("List grants")))
   .addSubcommandGroup((g) => g.setName("node").setDescription("Node agents (admin)")
-    .addSubcommand((s) => s.setName("add").setDescription("Add or update a node agent").addStringOption((o) => o.setName("name").setDescription("Origin name from the inventory (e.g. web02)").setRequired(true)).addStringOption((o) => o.setName("url").setDescription("Agent URL").setRequired(true)).addStringOption((o) => o.setName("token").setDescription("Agent token (wpops token rotate)").setRequired(true)))
+    .addSubcommand((s) => s.setName("add").setDescription("Add or update a node agent").addStringOption((o) => o.setName("name").setDescription("Origin name from the inventory (e.g. web02)").setRequired(true)).addStringOption((o) => o.setName("url").setDescription("Agent URL (https://, or http:// on a private address)").setRequired(true)).addStringOption((o) => o.setName("token").setDescription("Agent token (wpops token rotate)").setRequired(true)))
     .addSubcommand((s) => s.setName("remove").setDescription("Remove a node").addStringOption((o) => o.setName("name").setDescription("Node name").setRequired(true)))
     .addSubcommand((s) => s.setName("list").setDescription("List nodes")))
   .addSubcommandGroup((g) => g.setName("setup").setDescription("Settings (admin)")
@@ -416,8 +417,8 @@ async function cmdPerms(i: ChatInputCommandInteraction, sub: string): Promise<vo
   if (sub === "list") {
     const rows = listGrants(i.guildId);
     const lines = rows.map((r) => `• ${r.principal_type === "user" ? `<@${r.principal_id}>` : `<@&${r.principal_id}>`} - **${r.capability}** (by <@${r.granted_by}> <t:${Math.floor(r.granted_at / 1000)}:d>)`);
-    const admins = i.client.application?.id ? "" : "";
-    await i.reply({ embeds: [new EmbedBuilder().setTitle("WordPress ops permissions").setColor(COLOR.info).setDescription((lines.join("\n") || "No grants yet.") + `\n\nAdmins (always everything): ${wpops ? "" : ""}${admins}${(process.env.ADMIN_USER_IDS ?? "").split(",").filter(Boolean).map((id) => `<@${id.trim()}>`).join(", ") || "none"}`)], ...EPH });
+    const admins = env().ADMIN_USER_IDS.map((id) => `<@${id}>`).join(", ") || "none";
+    await i.reply({ embeds: [new EmbedBuilder().setTitle("WordPress ops permissions").setColor(COLOR.info).setDescription(`${lines.join("\n") || "No grants yet."}\n\nBot admins (always everything): ${admins}`)], ...EPH });
     return;
   }
   const user = i.options.getUser("user"); const role = i.options.getRole("role");
@@ -435,6 +436,14 @@ async function cmdPerms(i: ChatInputCommandInteraction, sub: string): Promise<vo
     return;
   }
   const capability = (i.options.getString("capability") ?? undefined) as Capability | undefined;
+  // Same rule as granting: only bot admins may touch an admin grant, so one
+  // delegated admin cannot remove another.
+  const touchesAdmin = capability === "admin" || (!capability && listGrants(i.guildId).some((g) =>
+    g.principal_type === principal_type && g.principal_id === principal_id && g.capability === "admin"));
+  if (touchesAdmin && !isAdminUser(i.user.id)) {
+    await i.reply({ content: `Only bot admins (ADMIN_USER_IDS) can revoke **admin**. ${capability ? "" : `${who} holds an admin grant; revoke the other capabilities one by one.`}`.trim(), ...EPH });
+    return;
+  }
   const n = revoke(i.guildId, principal_type, principal_id, capability);
   await i.reply({ content: n ? `Revoked ${capability ?? "all capabilities"} from ${who}.` : `${who} had no matching grant.`, ...EPH });
 }
