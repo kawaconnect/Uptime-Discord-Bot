@@ -84,7 +84,9 @@ export async function handlePhoneCommand(
   }
 
   const master = isPhoneEscalationEnabled();
-  const url = getSettingOrEnv("PBX_ALERT_URL") || "not set";
+  // The connector address is internal detail: only admins see it.
+  const configuredUrl = getSettingOrEnv("PBX_ALERT_URL");
+  const url = !configuredUrl ? "not set" : isAdmin(interaction.user.id) ? configuredUrl : "configured";
   const lines = callKindStates()
     .map((s) => `${s.enabled ? "📞" : "🔕"} ${s.label}`)
     .join("\n");

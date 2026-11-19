@@ -2,6 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Security
+- `/wp perms revoke`: only bot admins (`ADMIN_USER_IDS`) can revoke an **admin**
+  grant, matching the rule for granting it. A delegated admin could remove
+  another delegated admin before.
+- `/phone show` tells non-admins only whether a PBX connector is configured,
+  not its address.
+
+### Fixed
+- A blank `SMTP_TLS_REJECT_UNAUTHORIZED=` (as shipped in `.env.example`) was
+  read as "verify", which broke STARTTLS to an in-cluster relay with a
+  self-signed certificate. Blank now means unset.
+- `.env.example` said `DISCORD_GUILD_ID` could be left blank for global
+  commands; the bot has always required it. The unreachable global-deploy
+  branch is removed.
+- `.env.example` had comments after values on the same line, which
+  `docker run --env-file` passes through as part of the value.
+
+### Changed
+- README: Discord application setup, environment variable reference,
+  troubleshooting, and a Docker example that uses a named volume. `.env.example`
+  lists the node agent, phone escalation and probe variables.
+- Example host names in docs, comments and tests are generic.
+
 ## [1.1.16] - 2026-11-15
 
 ### Fixed
