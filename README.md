@@ -33,6 +33,29 @@ status board, one alerting pipeline, and a set of slash commands:
   forces a full reconnect when heartbeats go stale (>90s), so silent failures
   don't go unnoticed.
 
+## Discord application setup
+
+1. In the [Discord Developer Portal](https://discord.com/developers/applications)
+   create an application. Copy the **Application ID** (`DISCORD_CLIENT_ID`).
+2. Under **Bot**, reset and copy the token (`DISCORD_TOKEN`). No privileged
+   gateway intents are needed: the bot uses `Guilds` and `GuildMessages` only
+   and never reads message content. Turn **Public Bot** off so nobody else can
+   add it to their server.
+3. Under **OAuth2 > URL Generator** pick the scopes `bot` and
+   `applications.commands`, and these bot permissions: View Channels, Send
+   Messages, Embed Links, Read Message History, and Mention Everyone (only if
+   you want paging alerts to ping `@everyone`). Open the generated URL and add
+   the bot to your server.
+4. In Discord, enable Developer Mode (User Settings > Advanced), then right-click
+   the server to copy its ID (`DISCORD_GUILD_ID`) and your own user to copy
+   yours (`ADMIN_USER_IDS`, comma-separated for several admins).
+5. Start the bot (see [Running with Docker](#running-with-docker)), then run
+   `/setup status #channel` and `/setup alerts #channel`.
+
+Slash commands are registered on the one server in `DISCORD_GUILD_ID` at every
+start. The bot keeps a single set of channels and settings, so run one instance
+per server.
+
 ## Configuration model
 
 Config comes from two layers, and **the runtime layer overrides the environment**:
@@ -55,17 +78,63 @@ the other bot secrets: if it is lost or changed, the encrypted values read as
 unset and must be entered again. Without the key they are stored in plaintext,
 as before, and the bot logs a warning at startup.
 
-**Admins.** `/setup`, `/sg-setup`, `/sg-pause`, `/pause`, `/resume` and
-`/phone toggle` only work for the Discord user IDs in `ADMIN_USER_IDS`. With the
-list empty nobody can run them (they answer "Admins only."). Apart from
-`/phone`, these commands are also hidden from members without Manage Server
-by default.
+**Admins.** `/setup`, `/sg-setup`, `/sg-pause`, `/maintenance start|end`,
+`/pause`, `/resume`, `/phone toggle` and `/wp node add|remove` only work for the
+Discord user IDs in `ADMIN_USER_IDS`, whatever Discord roles a member holds.
+With the list empty nobody can run them (they answer "Admins only."). Apart
+from `/phone`, these commands are also hidden from members without Manage
+Server by default. The read-only commands (`/status`, `/monitors`,
+`/sg-status`, ...) answer any member privately. `/wp` has its own delegated
+permissions, see [WordPress operations](#wordpress-operations-wp).
 
 **Reaching Kuma through Authentik.** Point `KUMA_URL` at the public Kuma URL
 and set `KUMA_AUTH_HEADER` to the full `Authorization` header value Authentik
 accepts (for `intercept_header_auth`, `Basic <base64 user:app-password>`). The
 bot then connects over websocket only, sends the header on the upgrade, and
 never logs it. Kuma's own login stays disabled (auto-login).
+
+## Environment variables
+
+Comments in `.env` go on their own lines: `docker run --env-file` does not strip
+a trailing `# comment` from a value.
+
+| Variable | Required | Default | Purpose |
+|---|---|---|---|
+| `DISCORD_TOKEN` | yes | | Bot token |
+| `DISCORD_CLIENT_ID` | yes | | Application ID |
+| `DISCORD_GUILD_ID` | yes | | The server the commands are registered on |
+| `ADMIN_USER_IDS` | no | empty | Comma-separated user IDs for admin commands; empty means nobody |
+| `KUMA_URL` | yes | | Uptime Kuma URL (Socket.IO) |
+| `KUMA_USERNAME`, `KUMA_PASSWORD` | no | | Kuma login; leave blank when Kuma's own auth is disabled |
+| `KUMA_AUTH_HEADER` | no | | Full `Authorization` header value for an auth proxy in front of Kuma |
+| `PORT` | no | `3100` | HTTP port for `/healthz`, `/readyz`, `/debug/*` |
+| `DEBUG_TOKEN` | no | | Bearer token for `/debug/*`; unset means those routes do not exist |
+| `SETTINGS_ENCRYPTION_KEY` | no | | Encrypts secrets saved through slash commands in `data/bot.db` |
+| `LOG_LEVEL` | no | `info` | `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent` |
+| `SG_HEALTH_URL`, `SG_HEALTH_API_KEY` | no | | SiteGuard health endpoint and its key (or `/sg-setup connect`) |
+| `SG_HEALTH_POLL_MS` | no | `60000` | SiteGuard poll interval |
+| `SG_ALERT_REPEAT_MIN` | no | `30` | Minutes between reminders while down (0 = off) |
+| `SG_DIRECT_PROBE` | no | on | `false` turns off the bot's own HTTP probe of each site |
+| `SG_DIRECT_PROBE_FAILS` | no | `2` | Failed probes in a row before a site counts as down |
+| `SG_DIRECT_PROBE_NODES` | no | `false` | `true` also probes sites reported by node agents |
+| `SG_SITE_DOWN_FAILS` | no | `3` | Failed SiteGuard self-checks in a row before a site counts as down |
+| `WPOPS_NODES`, `WPOPS_TOKEN_<NAME>` | no | | Node agents as `name=url,...` plus one token each (or `/wp node add`) |
+| `WPOPS_NODE_LABELS` | no | | Status board names, `name=label,...` |
+| `WPOPS_SITE_NODES` | no | all | Only monitor the sites of these nodes |
+| `WPOPS_UNREACHABLE_AFTER` | no | `3` | Failed polls in a row before a node is reported unreachable |
+| `PHONE_ESCALATION_ENABLED` | no | off | `true` reports lasting outages to the PBX connector |
+| `PBX_ALERT_URL`, `PBX_ALERT_TOKEN` | no | | PBX connector base URL and bearer token |
+| `ZAMMAD_BASE_URL`, `ZAMMAD_API_TOKEN` | no | | Zammad API for incident tickets (or `/sg-setup tickets`) |
+| `ZAMMAD_PUBLIC_URL` | no | base URL | URL used in ticket links |
+| `ZAMMAD_TICKET_GROUP` | no | `Users` | Group for new tickets |
+| `ZAMMAD_TICKET_CUSTOMER` | no | `uptime-bot@<zammad host>` | Customer email for new tickets |
+| `ZAMMAD_TICKET_CLOSE_ON_RECOVERY` | no | `true` | `false` leaves tickets open on recovery |
+| `ZAMMAD_TICKET_MODE` | no | `fallback` | `fallback` (only when the alert email failed), `always`, `off` |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`, `SMTP_TO` | no | port `25` | Alert email (or `/setup smtp`) |
+| `SMTP_TLS_REJECT_UNAUTHORIZED` | no | see right | Verify the relay certificate. Unset: verified, except for `localhost` and `*.svc` cluster names |
+
+Anything a slash command can set (channels, SMTP, SiteGuard, Zammad, nodes) is
+stored in `data/bot.db` and wins over the environment.
 
 ## Alert delivery guarantees
 
@@ -114,17 +183,22 @@ never logs it. Kuma's own login stays disabled (auto-login).
 ## Running with Docker
 
 ```bash
+cp .env.example .env   # fill in DISCORD_*, ADMIN_USER_IDS and KUMA_URL
 docker build -t uptime-discord-bot .
 docker run -d --name uptime-bot \
+  --restart unless-stopped \
   --env-file .env \
-  -p 3100:3100 \
-  -v "$(pwd)/data:/app/data" \
+  -p 127.0.0.1:3100:3100 \
+  -v uptime-bot-data:/app/data \
   uptime-discord-bot
 ```
 
-The image exposes a health endpoint on port `3100` (`/healthz`) and runs as a
-non-root user. Mount a volume at `/app/data` to persist the settings database
-(which also holds the schedule of timed `/pause` pauses).
+The image runs as a non-root user and serves `/healthz` on port `3100` (the
+port only needs publishing if something outside the container probes it). The
+named volume at `/app/data` keeps the settings database, including the schedule
+of timed pauses. If you bind-mount a host directory instead, make it writable
+for the container user first (`docker run --rm uptime-discord-bot id` shows the
+uid), otherwise the bot exits with a SQLite "unable to open database file" error.
 Prebuilt images come from GitLab CI; see
 [Building / Releases (GitLab CI)](#building--releases-gitlab-ci).
 
@@ -171,7 +245,7 @@ do not start a pipeline.
 
 | Stage | Job | What it does |
 |-------|-----|--------------|
-| `test` | `check` | On `node:24-alpine` (the Dockerfile's base image): `npm ci`, `npm audit --audit-level=high`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`, then `ci/smoke.sh`, which checks `dist/index.js` exists and that the better-sqlite3 native binding loads and runs a query. The bot itself is not started (it needs Discord and Kuma). |
+| `test` | `check` | On `node:26-alpine` (the Dockerfile's base image): `npm ci`, `npm audit --audit-level=high`, `npm run typecheck`, `npm run lint`, `npm test`, `npm run build`, then `ci/smoke.sh`, which checks `dist/index.js` exists and that the better-sqlite3 native binding loads and runs a query. The bot itself is not started (it needs Discord and Kuma). |
 | `build` | `build` | Builds the `Dockerfile` with Docker-in-Docker on the cluster runner, pushes to the GitLab container registry as `uptime-discord-bot`, and mirrors the tags to `ghcr.io/deenyoro/uptime-discord-bot` (the same name the old GitHub workflow published; skipped if the instance-level `GHCR_TOKEN` variable is unset). Runs only if `check` passed. |
 
 **Image tags:** every build gets `sha-<short sha>`. A tag `v1.2.3` (or a manual
@@ -188,7 +262,7 @@ manual run on a branch without `RELEASE_VERSION` gets `<branch>` and
 `package-lock.json`), add a `CHANGELOG.md` entry, commit, then push an
 annotated `vX.Y.Z` tag. The tag pipeline checks, builds and publishes the image.
 
-To run the same checks locally on Node 24:
+To run the same checks locally on Node 26:
 
 ```bash
 npm ci && npm audit && npm run typecheck && npm run lint && npm test && npm run build && sh ci/smoke.sh
@@ -386,6 +460,40 @@ registry) keep working for failover, backups and restores as before.
 The `/debug/*` routes exist only when `DEBUG_TOKEN` is set, and then require
 `Authorization: Bearer <DEBUG_TOKEN>` (401 otherwise). Without it they answer
 404. `/healthz` and `/readyz` are always open.
+
+## Troubleshooting
+
+- **"Missing or invalid environment variables" at startup.** The lines below
+  it name each variable. `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`,
+  `DISCORD_GUILD_ID` and `KUMA_URL` are required.
+- **Slash commands do not appear.** Check the log for "Failed to deploy slash
+  commands": the bot must be in the server named by `DISCORD_GUILD_ID` and must
+  have been invited with the `applications.commands` scope.
+- **"Admins only."** Your user ID is not in `ADMIN_USER_IDS`. Discord roles do
+  not count. Restart after changing it.
+- **Setup commands are missing for some members.** They are hidden from members
+  without Manage Server; change that under Server Settings > Integrations.
+- **No status board or alerts.** Run `/setup show`. Set the channels with
+  `/setup status` and `/setup alerts`, and give the bot View Channel, Send
+  Messages, Embed Links and Read Message History there. "Missing Access" or
+  "Missing Permissions" in the log means a channel permission is missing.
+- **Alerts arrive but `@everyone` does not ping.** The bot needs Mention
+  Everyone in the alert channel, and the mention toggle must be on
+  (`/setup alerts-toggle`, `/sg-setup alerts-toggle`).
+- **`/readyz` answers 503, or the board says Kuma is disconnected.** Check
+  `KUMA_URL` from inside the container, and the credentials. Behind an auth
+  proxy use an internal URL or `KUMA_AUTH_HEADER`.
+- **"unable to open database file".** `/app/data` is not writable by the
+  container user, see [Running with Docker](#running-with-docker).
+- **A saved API key or SMTP password reads as unset after a restart.**
+  `SETTINGS_ENCRYPTION_KEY` changed or was removed; the log says which setting.
+  Restore the key or enter the value again.
+- **`/sg-setup connect` says authentication failed.** The key is not the
+  SiteGuard health API key, or the plugin's health monitor is off. Nothing is
+  saved in that case.
+- **Email test fails with a certificate error.** Set
+  `SMTP_TLS_REJECT_UNAUTHORIZED=false` only for a relay you trust on a private
+  network.
 
 ## License
 
