@@ -10,6 +10,8 @@ status board, one alerting pipeline, and a set of slash commands:
    endpoint (the [SiteGuard Backup](https://github.com/kawaconnect/SiteGuard-Backup)
    plugin). Fully optional and independent of Kuma.
 
+![Status board in Discord: Kuma monitors by group, WordPress health from SiteGuard, and the time of the last refresh](docs/images/status-board.png)
+
 ## Features
 
 - **Unified status board** - a single, auto-updating embed (refreshed every 15s)
@@ -137,6 +139,8 @@ Anything a slash command can set (channels, SMTP, SiteGuard, Zammad, nodes) is
 stored in `data/bot.db` and wins over the environment.
 
 ## Alert delivery guarantees
+
+![A DOWN alert and the matching recovery alert in the alert channel](docs/images/alerts.png)
 
 - SiteGuard alert listeners attach at startup, before the first poll. A bot
   that starts (or reconnects) while WordPress is already unreachable announces
