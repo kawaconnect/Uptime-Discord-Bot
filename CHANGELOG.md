@@ -4,6 +4,10 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Docs
+
+- README: new example screenshots in `docs/images/` (made with example data only).
+
 ## [1.1.17] - 2026-11-19
 
 ### Security
